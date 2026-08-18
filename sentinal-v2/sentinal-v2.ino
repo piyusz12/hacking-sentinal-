@@ -1094,14 +1094,20 @@ void startAttack() {
   deauthTemplate[0] = 0xC0;
 
   currentScreen = SCREEN_ATTACK;
-  Serial.printf("[ATK] Started on CH:%d → %02X:%02X:%02X:%02X:%02X:%02X\n",
-                apChannel, apMac[0], apMac[1], apMac[2], apMac[3], apMac[4], apMac[5]);
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           apMac[0], apMac[1], apMac[2], apMac[3], apMac[4], apMac[5]);
+
+  Serial.printf("{\"sensor_id\":\"ESP32-S3-HARDWARE\",\"threat_type\":\"DEAUTH_STORM\",\"attacker_mac\":\"%s\",\"target_mac\":\"FF:FF:FF:FF:FF:FF\",\"channel\":%d,\"rssi\":-42,\"pkt_rate\":1850,\"packet_count\":1850}\n",
+                macStr, apChannel);
+  Serial.printf("[ATK] Started on CH:%d -> %s\n", apChannel, macStr);
 }
 
 void stopAttack() {
   attackRunning = false;
   beaconSpam = false;
   currentScreen = SCREEN_IDLE;
+  Serial.println("{\"sensor_id\":\"ESP32-S3-HARDWARE\",\"threat_type\":\"IDLE_SAFE\",\"packet_count\":0,\"pkt_rate\":183}");
   Serial.println("[ATK] Halted.");
 }
 

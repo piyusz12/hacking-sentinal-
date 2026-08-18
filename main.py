@@ -1,27 +1,30 @@
 """
-Sentinel DevSecOps AI Backend — Entry Point
+Sentinel DevSecOps & Wi-Fi IDS AI Backend — Main Entry Point
+============================================================
 
 Usage:
-    uvicorn backend_main.bckendmain:app --host 0.0.0.0 --port 8000 --reload
-
-Environment Variables:
-    SENTINEL_WS_TOKEN        - WebSocket auth token (default: sentinel-dev-token-change-me)
-    SENTINEL_LLM_MODEL       - LLM model name (default: gpt-4o-mini)
-    SENTINEL_CORS_ORIGINS    - Comma-separated CORS origins (default: http://localhost:5173,http://localhost:3000)
-    SENTINEL_MAX_DASHBOARD   - Max dashboard WebSocket connections (default: 20)
-    SENTINEL_MAX_ESP32       - Max ESP32 WebSocket connections (default: 5)
-    SENTINEL_MAX_AI_TASKS    - Max concurrent AI pipeline tasks (default: 5)
-    SENTINEL_MOCK_AI         - Use mock AI responses (default: true)
-    OPENAI_API_KEY           - OpenAI API key (required when SENTINEL_MOCK_AI=false)
+    python main.py
+    or:
+    uvicorn backend_server.main:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import os
+import sys
 import uvicorn
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "0.0.0.0")
+    print(f"🛡️ Launching Sentinel DevSecOps AI Backend on http://localhost:{port} ...")
     uvicorn.run(
-        "backend_main.bckendmain:app",
-        host="0.0.0.0",
-        port=8000,
+        "backend_server.main:app",
+        host=host,
+        port=port,
         reload=True,
         log_level="info"
     )
