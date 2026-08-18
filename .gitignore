@@ -11,3 +11,6 @@ dist/
 **/dist/
 .pytest_cache/
 *.log
+*.dll
+*.so
+*.dylib

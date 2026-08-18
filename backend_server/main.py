@@ -48,6 +48,27 @@ try:
 except ImportError:
     LANGCHAIN_AVAILABLE = False
 
+# Fast JSON serialization (Rust / C-accelerated)
+try:
+    import orjson
+    def fast_dumps(obj: Any) -> str:
+        return orjson.dumps(obj).decode("utf-8")
+    def fast_loads(s: Union[str, bytes]) -> Any:
+        return orjson.loads(s)
+    ORJSON_AVAILABLE = True
+except ImportError:
+    def fast_dumps(obj: Any) -> str:
+        return json.dumps(obj)
+    def fast_loads(s: Union[str, bytes]) -> Any:
+        return json.loads(s)
+    ORJSON_AVAILABLE = False
+
+# Native 802.11 Frame Decoder Bridge
+try:
+    from backend_server.frame_parser import decode_80211_frame, NATIVE_AVAILABLE
+except ImportError:
+    from frame_parser import decode_80211_frame, NATIVE_AVAILABLE
+
 # --- Configuration & Environment ---
 WS_AUTH_TOKEN = os.environ.get("SENTINEL_WS_TOKEN", "sentinel-dev-token-change-me")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -323,6 +344,13 @@ class SerialConnectRequest(BaseModel):
     baud_rate: int = Field(default=115200)
 
 
+class RawFrameRequest(BaseModel):
+    frame_hex: str = Field(..., min_length=48)
+    sensor_id: Optional[str] = "ESP32-RAW-SNIFFER"
+    channel: Optional[int] = 6
+    rssi: Optional[int] = -50
+
+
 # --- In-Memory State & Buffers ---
 threat_history: List[Dict[str, Any]] = []
 system_start_time = datetime.now(timezone.utc)
@@ -384,10 +412,13 @@ class ConnectionManager:
             logger.info(f"ESP32 disconnected. Remaining: {len(self.esp32_clients)}")
 
     async def broadcast_to_dashboards(self, message: dict):
+        if not self.dashboard_clients:
+            return
+        payload_text = fast_dumps(message)
         disconnected = []
         for client in self.dashboard_clients:
             try:
-                await client.send_json(message)
+                await client.send_text(payload_text)
             except Exception:
                 disconnected.append(client)
         for dead in disconnected:
@@ -864,6 +895,52 @@ async def simulate_threat(sim: SimulationRequest):
         "success": True,
         "message": f"Threat simulation '{sim.threat_type}' dispatched to LangGraph Local AI pipeline",
         "payload": payload
+    }
+
+
+@app.post("/api/frames/parse-raw")
+async def parse_raw_80211_frame(req: RawFrameRequest):
+    """
+    Zero-Copy Native 802.11 MAC Frame Decoder & Real-Time Threat Classifier.
+    Processes raw hex frame bytes from Wireshark PCAPs or ESP32 promiscuous capture.
+    """
+    clean_hex = re.sub(r"[^0-9A-Fa-f]", "", req.frame_hex)
+    if len(clean_hex) < 48:
+        raise HTTPException(status_code=400, detail="Invalid hex string: 802.11 header requires at least 24 bytes (48 hex chars)")
+    
+    try:
+        raw_bytes = bytes.fromhex(clean_hex)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed hex string")
+    
+    parsed = decode_80211_frame(raw_bytes)
+    if not parsed.get("valid"):
+        raise HTTPException(status_code=400, detail=parsed.get("error", "Decoding failed"))
+    
+    # If classified as a threat, automatically forward to LangGraph AI pipeline
+    if parsed.get("is_threat"):
+        threat_payload = {
+            "sensor_id": req.sensor_id or "ESP32-RAW-SNIFFER",
+            "threat_type": parsed["threat_classification"],
+            "attacker_mac": parsed["transmitter_mac"],
+            "target_mac": parsed["receiver_mac"],
+            "channel": req.channel or 6,
+            "rssi": req.rssi or -50,
+            "packet_count": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        await manager.broadcast_to_dashboards({
+            "type": "raw_alert",
+            "data": threat_payload,
+            "received_at": datetime.now(timezone.utc).isoformat()
+        })
+        asyncio.create_task(run_ai_pipeline(threat_payload))
+    
+    return {
+        "success": True,
+        "parsed": parsed,
+        "is_threat": parsed.get("is_threat", False),
+        "threat_classification": parsed.get("threat_classification")
     }
 
 

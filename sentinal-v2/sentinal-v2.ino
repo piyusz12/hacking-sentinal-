@@ -1189,20 +1189,25 @@ String generateNetworkJSON() {
 //  UTILITIES
 // ═══════════════════════════════════════════════════════════════════
 
+static inline int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
 bool parseMac(String macStr, uint8_t* mac) {
   macStr.trim();
-  if (macStr.length() != 17) return false;
-  int values[6];
-  if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x",
-             &values[0], &values[1], &values[2],
-             &values[3], &values[4], &values[5]) == 6) {
-    for (int i = 0; i < 6; i++) {
-      if (values[i] < 0 || values[i] > 255) return false;
-      mac[i] = (uint8_t)values[i];
-    }
-    return true;
+  if (macStr.length() != 17 || !mac) return false;
+  const char* s = macStr.c_str();
+  for (int i = 0; i < 6; i++) {
+    int hi = hexNibble(s[i * 3]);
+    int lo = hexNibble(s[i * 3 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    if (i < 5 && s[i * 3 + 2] != ':' && s[i * 3 + 2] != '-') return false;
+    mac[i] = (uint8_t)((hi << 4) | lo);
   }
-  return false;
+  return true;
 }
 
 void processSerialCommand(String cmd) {

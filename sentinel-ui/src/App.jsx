@@ -206,7 +206,7 @@ function StatCard({ icon: Icon, label, value, trend, trendDir, colorClass }) {
   );
 }
 
-function ThreatFeedItem({ threat }) {
+const ThreatFeedItem = React.memo(function ThreatFeedItem({ threat }) {
   const ttype = threat.threat_type || threat.threat || 'ANOMALY';
   const Icon = getThreatIcon(ttype);
   const severity = ttype.includes('DEAUTH') || ttype.includes('TWIN') || ttype.includes('PMKID') ? 'critical' : 'warning';
@@ -244,9 +244,9 @@ function ThreatFeedItem({ threat }) {
       <div className="alert-time">{time}</div>
     </div>
   );
-}
+});
 
-function TopoMap({ devices, attacker, status }) {
+const TopoMap = React.memo(function TopoMap({ devices, attacker, status }) {
   const W = 460, H = 260, router = devices.find(d => d.id === 4) || devices[0], clients = devices.filter(d => d.id !== 4), green = "#06d6a0";
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
@@ -303,7 +303,7 @@ function TopoMap({ devices, attacker, status }) {
       </g>}
     </svg>
   );
-}
+});
 
 // ─── WebSocket Hook with Auto-Reconnect ───────────────────────────
 function useWebSocket(url) {
