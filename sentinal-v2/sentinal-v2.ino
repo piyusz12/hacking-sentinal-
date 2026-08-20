@@ -1,19 +1,26 @@
 /*
- * Sentinel Pro v2 — ESP32-S3 Security Testing Tool
+ * Sentinel Pro v3 — ESP32-S3 Security Testing Tool
  * FOR EDUCATIONAL USE ONLY. Use only on networks you own or have permission to test.
  * 
  * Hardware:
  *   - ESP32-S3 DevKitC
  *   - SSD1306 OLED 128x64 (I2C: SDA=GPIO 8, SCL=GPIO 9)
  *   - INMP441 I2S Mic (WS=GPIO 15, SCK=GPIO 14, SD=GPIO 13)
+ *   - MAX98357A I2S DAC/Amp (I2S1: BCK=GPIO 4, WS=GPIO 5, DATA=GPIO 6)
+ *   - Piezo Buzzer (PWM/LEDC: GPIO 16)
+ *   - WS2812B NeoPixel RGB (RMT: GPIO 48)
  * 
  * Features:
  *   - WPA2 protected AP + HTTP Basic Auth
- *   - 0.96" OLED visual alerts (boot, idle, scanning, attack, threat)
+ *   - 0.96" OLED visual alerts with hardware-accelerated updates
+ *   - Piezo buzzer siren during attacks (2500Hz square wave)
+ *   - RGB LED police siren effects (red/blue strobe)
+ *   - I2S speaker for AI mitigation chimes and boot sounds
  *   - INMP441 voice commands via clap pattern detection (Core 1)
  *     - 1 clap → Scan Networks
  *     - 2 claps → Stop All Attacks
  *     - 3 claps → Show Stats
+ *   - Realistic attack simulation with hardware feedback
  *   - XSS-safe SSID output, MAC validation, attack timeout
  */
 
@@ -28,8 +35,14 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// I2S Microphone
+// I2S Microphone & Speaker
 #include <driver/i2s.h>
+
+// LEDC PWM for Buzzer
+#include <driver/ledc.h>
+
+// RMT for NeoPixel
+#include <driver/rmt.h>
 
 // ═══════════════════════════════════════════════════════════════════
 //  PIN CONFIGURATION
@@ -43,11 +56,27 @@
 #define OLED_ADDR     0x3C
 #define OLED_RESET    -1    // No reset pin
 
-// INMP441 I2S Pins
-#define I2S_WS        15   // Word Select (LRCLK)
-#define I2S_SCK       14   // Serial Clock (BCLK)
-#define I2S_SD        13   // Serial Data (DOUT from mic)
-#define I2S_PORT      I2S_NUM_0
+// INMP441 I2S RX Pins (Microphone)
+#define I2S_RX_WS     15   // Word Select (LRCLK)
+#define I2S_RX_SCK    14   // Serial Clock (BCLK)
+#define I2S_RX_SD     13   // Serial Data (DOUT from mic)
+#define I2S_RX_PORT   I2S_NUM_0
+
+// MAX98357A I2S TX Pins (Speaker/DAC)
+#define I2S_TX_BCK    4    // Bit Clock
+#define I2S_TX_WS     5    // Word Select / LRCLK
+#define I2S_TX_DATA   6    // Serial Data Out
+#define I2S_TX_PORT   I2S_NUM_1
+
+// Piezo Buzzer (PWM via LEDC)
+#define BUZZER_PIN    16
+#define BUZZER_FREQ   2500  // 2500Hz for piercing alert
+#define BUZZER_CHANNEL 0
+
+// WS2812B NeoPixel RGB (RMT)
+#define NEOPIXEL_PIN  48
+#define NEOPIXEL_NUM  1
+#define RMT_CHANNEL   RMT_CHANNEL_0
 
 // ═══════════════════════════════════════════════════════════════════
 //  CONFIGURATION
@@ -77,6 +106,14 @@ const uint32_t CLAP_FINAL_MS    = 1000;       // Wait after last clap before exe
 // OLED refresh rate
 const unsigned long OLED_REFRESH_MS = 200;
 
+// Buzzer/Audio control
+const unsigned long BUZZER_ON_MS = 500;     // Buzzer on duration during attack
+const unsigned long BUZZER_OFF_MS = 500;    // Buzzer off duration (pulsing)
+const uint32_t NEOPIXEL_COLOR_RED = 0xFF0000;
+const uint32_t NEOPIXEL_COLOR_BLUE = 0x0000FF;
+const uint32_t NEOPIXEL_COLOR_GREEN = 0x00FF00;
+const uint32_t NEOPIXEL_COLOR_OFF = 0x000000;
+
 // ═══════════════════════════════════════════════════════════════════
 //  GLOBAL OBJECTS
 // ═══════════════════════════════════════════════════════════════════
@@ -85,6 +122,14 @@ Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 WebServer server(80);
 DNSServer dnsServer;
 Preferences prefs;
+
+// Hardware peripheral state
+bool buzzerEnabled = false;
+bool neopixelEnabled = false;
+bool speakerEnabled = false;
+unsigned long lastBuzzerToggle = 0;
+bool buzzerState = false;
+uint8_t neopixelRmtBuffer[24];  // RMT buffer for WS2812B
 
 // ═══════════════════════════════════════════════════════════════════
 //  STATE VARIABLES
@@ -154,6 +199,7 @@ uint8_t beaconTemplate[128] = {0};
 void scanNetworks();
 void startAttack();
 void stopAttack();
+    speakerPlayAlertChime();  // Play alert chime on timeout
 void sendDeauth();
 void sendBeacon();
 void fillBeaconTemplate();
@@ -181,6 +227,279 @@ void oledDrawStatusBar();
 void micInit();
 void micListenTask(void* parameter);
 void processVoiceCommand(int cmd);
+
+// Hardware peripheral functions (Buzzer, NeoPixel, Speaker)
+void buzzerInit();
+void buzzerStart();
+void buzzerStop();
+void buzzerUpdate();
+void neopixelInit();
+void neopixelSet(uint32_t color);
+void neopixelUpdate();
+void speakerInit();
+void speakerPlayBootChime();
+void speakerPlayAlertChime();
+void speakerStop();
+
+// ═══════════════════════════════════════════════════════════════════
+//  HARDWARE PERIPHERAL INITIALIZATION (BUZZER, NEOPIXEL, SPEAKER)
+// ═══════════════════════════════════════════════════════════════════
+
+void buzzerInit() {
+  // Configure LEDC PWM for buzzer
+  ledc_timer_config_t timer_conf = {
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .duty_resolution = LEDC_TIMER_10_BIT,
+    .timer_num = LEDC_TIMER_0,
+    .freq_hz = BUZZER_FREQ,
+    .clk_cfg = LEDC_AUTO_CLK
+  };
+  ledc_timer_config(&timer_conf);
+  
+  ledc_channel_config_t ch_conf = {
+    .gpio_num = BUZZER_PIN,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = BUZZER_CHANNEL,
+    .intr_type = LEDC_INTR_DISABLE,
+    .timer_sel = LEDC_TIMER_0,
+    .duty = 0,
+    .hpoint = 0
+  };
+  ledc_channel_config(&ch_conf);
+  
+  buzzerEnabled = true;
+  Serial.println("[BUZZER] Piezo initialized on GPIO " + String(BUZZER_PIN));
+}
+
+void buzzerStart() {
+  if (!buzzerEnabled) return;
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL, 512);  // 50% duty cycle
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL);
+  buzzerState = true;
+  lastBuzzerToggle = millis();
+}
+
+void buzzerStop() {
+  if (!buzzerEnabled) return;
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL, 0);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL);
+  buzzerState = false;
+}
+
+void buzzerUpdate() {
+  if (!buzzerEnabled || !attackRunning) {
+    buzzerStop();
+    return;
+  }
+  
+  unsigned long now = millis();
+  if (now - lastBuzzerToggle >= (buzzerState ? BUZZER_ON_MS : BUZZER_OFF_MS)) {
+    buzzerState = !buzzerState;
+    lastBuzzerToggle = now;
+    if (buzzerState) {
+      ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL, 512);
+    } else {
+      ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL, 0);
+    }
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, BUZZER_CHANNEL);
+  }
+}
+
+void neopixelInit() {
+  // Configure RMT for WS2812B
+  rmt_config_t rmt_tx = {
+    .rmt_mode = RMT_MODE_TX,
+    .channel = RMT_CHANNEL,
+    .gpio_num = (gpio_num_t)NEOPIXEL_PIN,
+    .clk_div = 2,
+    .mem_block_num = 1,
+    .tx_config = {
+      .carrier_freq_hz = 38000,
+      .carrier_level = RMT_CARRIER_LEVEL_HIGH,
+      .idle_level = RMT_IDLE_LEVEL_LOW,
+      .carrier_en = false,
+      .loop_en = false,
+      .idle_output_en = true,
+    }
+  };
+  esp_err_t err = rmt_config(&rmt_tx);
+  if (err != ESP_OK) {
+    Serial.printf("[NeoPixel] RMT config failed: %d\\n", err);
+    neopixelEnabled = false;
+    return;
+  }
+  rmt_driver_install(RMT_CHANNEL, 0, 0);
+  neopixelEnabled = true;
+  Serial.println("[NeoPixel] WS2812B initialized on GPIO " + String(NEOPIXEL_PIN));
+}
+
+// Convert 24-bit color to WS2812B RMT pulses
+void neopixelSet(uint32_t color) {
+  if (!neopixelEnabled) return;
+  
+  // WS2812B timing: 0 = ~0.4us high, ~0.8us low; 1 = ~0.8us high, ~0.4us low
+  // With clk_div=2, each tick = 25ns (40MHz / 2)
+  // 0: 16 ticks high, 32 ticks low
+  // 1: 32 ticks high, 16 ticks low
+  
+  uint8_t grb[3] = {(uint8_t)((color >> 16) & 0xFF),  // Green
+                    (uint8_t)((color >> 8) & 0xFF),   // Red
+                    (uint8_t)(color & 0xFF)};         // Blue
+  
+  int idx = 0;
+  for (int c = 0; c < 3; c++) {
+    for (int b = 7; b >= 0; b--) {
+      if ((grb[c] >> b) & 0x01) {
+        neopixelRmtBuffer[idx++] = 32;  // T1H
+        neopixelRmtBuffer[idx++] = 16;  // T1L
+      } else {
+        neopixelRmtBuffer[idx++] = 16;  // T0H
+        neopixelRmtBuffer[idx++] = 32;  // T0L
+      }
+    }
+  }
+  
+  // Build RMT items
+  rmt_item32_t items[24];
+  for (int i = 0; i < 24; i++) {
+    items[i].duration0 = neopixelRmtBuffer[i];
+    items[i].level0 = 1;
+    items[i].duration1 = (i % 2 == 0) ? neopixelRmtBuffer[i+1] : 0;
+    items[i].level1 = 0;
+    if (i % 2 == 1) {
+      items[i-1].duration1 = neopixelRmtBuffer[i];
+    }
+  }
+  
+  // Simpler approach: use built-in RMT write
+  rmt_write_sample(RMT_CHANNEL, grb, 3, true);
+}
+
+void neopixelUpdate() {
+  if (!neopixelEnabled) return;
+  
+  if (attackRunning) {
+    // Police siren effect: alternate red/blue
+    unsigned long cycle = (millis() / 300) % 2;
+    neopixelSet(cycle == 0 ? NEOPIXEL_COLOR_RED : NEOPIXEL_COLOR_BLUE);
+  } else if (beaconSpam) {
+    // Steady green for beacon mode
+    neopixelSet(NEOPIXEL_COLOR_GREEN);
+  } else {
+    // Off when idle
+    neopixelSet(NEOPIXEL_COLOR_OFF);
+  }
+}
+
+void speakerInit() {
+  i2s_config_t i2s_tx_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = 22050,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 4,
+    .dma_buf_len = 64,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
+  };
+  
+  i2s_pin_config_t tx_pins = {
+    .bck_io_num = I2S_TX_BCK,
+    .ws_io_num = I2S_TX_WS,
+    .data_out_num = I2S_TX_DATA,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+  
+  esp_err_t err = i2s_driver_install(I2S_TX_PORT, &i2s_tx_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("[Speaker] I2S TX install failed: %d\\n", err);
+    speakerEnabled = false;
+    return;
+  }
+  
+  err = i2s_set_pin(I2S_TX_PORT, &tx_pins);
+  if (err != ESP_OK) {
+    Serial.printf("[Speaker] I2S set pin failed: %d\\n", err);
+    i2s_driver_uninstall(I2S_TX_PORT);
+    speakerEnabled = false;
+    return;
+  }
+  
+  i2s_start(I2S_TX_PORT);
+  speakerEnabled = true;
+  Serial.println("[Speaker] MAX98357A I2S DAC initialized");
+}
+
+void speakerPlayBootChime() {
+  if (!speakerEnabled) return;
+  
+  // Simple ascending chime: C4-E4-G4-C5
+  const float notes[] = {261.63, 329.63, 392.00, 523.25};
+  const int durations[] = {150, 150, 150, 300};  // ms
+  
+  for (int i = 0; i < 4; i++) {
+    const int sampleRate = 22050;
+    const int noteDuration = durations[i];
+    const int numSamples = (sampleRate * noteDuration) / 1000;
+    const float freq = notes[i];
+    
+    int16_t* buffer = (int16_t*)malloc(numSamples * 2 * sizeof(int16_t));
+    if (!buffer) continue;
+    
+    for (int s = 0; s < numSamples; s++) {
+      float t = (float)s / sampleRate;
+      float sample = sin(2 * PI * freq * t) * 0.5;
+      
+      // Add slight decay
+      float decay = 1.0 - ((float)s / numSamples) * 0.3;
+      sample *= decay;
+      
+      buffer[s] = (int16_t)(sample * 32767);
+      buffer[numSamples + s] = buffer[s];  // Duplicate for stereo
+    }
+    
+    size_t written;
+    i2s_write(I2S_TX_PORT, buffer, numSamples * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+    free(buffer);
+  }
+}
+
+void speakerPlayAlertChime() {
+  if (!speakerEnabled) return;
+  
+  // Alert sound: descending minor third (tension)
+  const float notes[] = {523.25, 415.30};  // C5 -> G#4
+  const int durations[] = {200, 300};
+  
+  for (int i = 0; i < 2; i++) {
+    const int sampleRate = 22050;
+    const int noteDuration = durations[i];
+    const int numSamples = (sampleRate * noteDuration) / 1000;
+    const float freq = notes[i];
+    
+    int16_t* buffer = (int16_t*)malloc(numSamples * 2 * sizeof(int16_t));
+    if (!buffer) continue;
+    
+    for (int s = 0; s < numSamples; s++) {
+      float t = (float)s / sampleRate;
+      float sample = sin(2 * PI * freq * t) * 0.6;
+      buffer[s] = (int16_t)(sample * 32767);
+      buffer[numSamples + s] = buffer[s];
+    }
+    
+    size_t written;
+    i2s_write(I2S_TX_PORT, buffer, numSamples * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+    free(buffer);
+  }
+}
+
+void speakerStop() {
+  if (!speakerEnabled) return;
+  i2s_zero_dma_buffer(I2S_TX_PORT);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 //  OLED DISPLAY IMPLEMENTATION
@@ -671,6 +990,7 @@ void processVoiceCommand(int cmd) {
       screenTimeout = millis() + 2000;
       delay(500);
       stopAttack();
+    speakerPlayAlertChime();  // Play alert chime on timeout
       currentScreen = SCREEN_VOICE_EXEC;
       oledVoiceCmd = "ATTACKS STOPPED";
       screenTimeout = millis() + 3000;
@@ -909,26 +1229,32 @@ void setup() {
   // 1. Initialize OLED first (shows boot screen)
   oledInit();
   delay(800);
-
   Serial.println("\n════════════════════════════════════════");
-  Serial.println("  Sentinel Pro v2 — ESP32-S3");
-  Serial.println("  OLED + INMP441 Voice Commands");
+  Serial.println("  Sentinel Pro v3 — ESP32-S3");
+  Serial.println("  Full Hardware Suite: OLED+Buzzer+RGB+Speaker+Mic");
   Serial.println("  FOR AUTHORIZED USE ONLY");
   Serial.println("════════════════════════════════════════");
 
-  // 2. Initialize preferences
+  // 2. Initialize hardware peripherals in order
+  buzzerInit(); delay(200);
+  neopixelInit(); neopixelSet(NEOPIXEL_COLOR_BLUE); delay(200);
+  speakerInit(); delay(300);
+  if (speakerEnabled) speakerPlayBootChime();
+  neopixelSet(NEOPIXEL_COLOR_GREEN); delay(500);
+  neopixelSet(NEOPIXEL_COLOR_OFF);
+
+  // 3. Initialize preferences
   prefs.begin("sentinel");
   String savedPass = prefs.getString("ap_pass", AP_PASS);
 
-  // 3. Start WiFi AP
+  // 4. Start WiFi AP
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(apIP, apIP, netMsk);
   WiFi.softAP(AP_SSID, savedPass.c_str());
   dnsServer.start(DNS_PORT, "*", apIP);
+  Serial.printf("[WiFi] AP started. IP: %s\n", WiFi.softAPIP().toString().c_str());
 
-  Serial.printf("[WiFi] AP '%s' started. IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
-
-  // 4. Initialize INMP441 microphone on Core 1
+  // 5. Initialize INMP441 microphone on Core 1
   micInit();
 
   // 5. Setup web server routes
@@ -985,6 +1311,7 @@ void setup() {
   server.on("/stop", HTTP_GET, []() {
     if (!authenticateRequest()) return;
     stopAttack();
+    speakerPlayAlertChime();  // Play alert chime on timeout
     currentScreen = SCREEN_IDLE;
     server.send(200, "text/plain", "All attacks stopped");
   });
@@ -1031,10 +1358,14 @@ void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
 
+  // Update hardware peripherals (buzzer, RGB LED)
+  buzzerUpdate();
+  neopixelUpdate();
   // Auto-stop attack after timeout
   if ((attackRunning || beaconSpam) && (millis() - attackStartTime > ATTACK_TIMEOUT_MS)) {
-    Serial.println("⏱️ Attack auto-stopped (timeout reached).");
+    Serial.println("[ATK] Auto-stopped (timeout reached).");
     stopAttack();
+    speakerPlayAlertChime();  // Play alert chime on timeout
     oledAlertText = "TIMEOUT - STOPPED";
     currentScreen = SCREEN_ALERT;
     screenTimeout = millis() + 3000;
@@ -1094,6 +1425,9 @@ void startAttack() {
   deauthTemplate[0] = 0xC0;
 
   currentScreen = SCREEN_ATTACK;
+  // Play alert chime and flash RGB on attack start
+  speakerPlayAlertChime();
+  neopixelSet(NEOPIXEL_COLOR_RED);  // Immediate red flash
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
            apMac[0], apMac[1], apMac[2], apMac[3], apMac[4], apMac[5]);
@@ -1106,6 +1440,9 @@ void startAttack() {
 void stopAttack() {
   attackRunning = false;
   beaconSpam = false;
+  // Stop audio alerts
+  buzzerStop();
+  speakerStop();
   currentScreen = SCREEN_IDLE;
   Serial.println("{\"sensor_id\":\"ESP32-S3-HARDWARE\",\"threat_type\":\"IDLE_SAFE\",\"packet_count\":0,\"pkt_rate\":183}");
   Serial.println("[ATK] Halted.");
@@ -1243,6 +1580,7 @@ void processSerialCommand(String cmd) {
   }
   else if (cmd == "stop") {
     stopAttack();
+    speakerPlayAlertChime();  // Play alert chime on timeout
   }
   else if (cmd == "stats") {
     Serial.printf("Deauth: %lu | Beacons: %lu | Running: %s | Mic: %s\n",
