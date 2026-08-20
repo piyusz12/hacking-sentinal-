@@ -1198,7 +1198,10 @@ class AutoSimulationEngine:
                 await manager.broadcast_to_esp32({
                     "type": "simulate_alert",
                     "threat_type": payload["threat_type"],
-                    "mac": payload["attacker_mac"]
+                    "mac": payload["attacker_mac"],
+                    "rssi": payload.get("rssi", -42),
+                    "channel": payload.get("channel", 6),
+                    "packet_count": payload.get("packet_count") or payload.get("pkt_rate") or 1850
                 })
 
                 # Full AI pipeline analysis
@@ -1446,7 +1449,10 @@ async def simulate_threat(sim: SimulationRequest):
     await manager.broadcast_to_esp32({
         "type": "simulate_alert",
         "threat_type": payload["threat_type"],
-        "mac": payload["attacker_mac"]
+        "mac": payload["attacker_mac"],
+        "rssi": payload.get("rssi", -42),
+        "channel": payload.get("channel", 6),
+        "packet_count": payload.get("packet_count") or payload.get("pkt_rate") or 1850
     })
 
     # 2. Async AI pipeline execution
