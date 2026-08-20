@@ -4,12 +4,16 @@ Handles threat detection, simulation, and history endpoints.
 """
 
 import asyncio
+import csv
+import io
+import logging
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from backend_server.config import settings
 from backend_server.exceptions import (
@@ -28,10 +32,36 @@ from backend_server.models.schemas import (
 
 # Router instance
 router = APIRouter(prefix="/api/threats", tags=["threats"])
+logger = logging.getLogger(__name__)
 
 # In-memory storage (will be replaced with database)
 threat_history: List[Dict[str, Any]] = []
 total_threats_detected = 0
+
+
+class ThreatSimulationPayload(BaseModel):
+    threat_type: str = Field(default="DEAUTH_STORM")
+    attacker_mac: Optional[str] = Field(default="DE:AD:BE:EF:00:01")
+    target_mac: Optional[str] = Field(default="FF:FF:FF:FF:FF:FF")
+    channel: Optional[int] = Field(default=6, ge=1, le=14)
+    rssi: Optional[int] = Field(default=-42, ge=-100, le=0)
+    packet_count: Optional[int] = Field(default=1850, ge=1)
+    intensity: Optional[Literal["low", "medium", "high"]] = Field(default=None)
+
+
+def normalize_threat_type(threat_type: str) -> str:
+    threat_type_upper = threat_type.upper()
+    if "DEAUTH" in threat_type_upper:
+        return ThreatType.DEAUTH.value
+    if "BEACON" in threat_type_upper:
+        return ThreatType.BEACON_FLOOD.value
+    if "PROBE" in threat_type_upper:
+        return ThreatType.PROBE_FLOOD.value
+    if "EVIL" in threat_type_upper and "TWIN" in threat_type_upper:
+        return ThreatType.EVIL_TWIN.value
+    if "KRACK" in threat_type_upper:
+        return ThreatType.KRACK.value
+    return ThreatType.UNKNOWN.value
 
 
 def calculate_severity(threat_type: str, packet_count: int, rssi: int) -> str:
