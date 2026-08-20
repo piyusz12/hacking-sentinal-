@@ -22,6 +22,7 @@ from backend_server.services.ai_engine import ai_engine
 logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter(prefix="/api/threats", tags=["threats"])
+logger = logging.getLogger(__name__)
 
 # In-memory threat storage (to be replaced with database)
 threat_history: List[Dict[str, Any]] = []
