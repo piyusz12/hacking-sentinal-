@@ -80,7 +80,6 @@ DEFAULT_LOCAL_MODEL = os.environ.get("SENTINEL_LOCAL_MODEL", "llama3.2-vision:la
 MAX_DASHBOARD_CLIENTS = int(os.environ.get("SENTINEL_MAX_DASHBOARD", "50"))
 MAX_ESP32_CLIENTS = int(os.environ.get("SENTINEL_MAX_ESP32", "10"))
 MAX_CONCURRENT_AI_TASKS = int(os.environ.get("SENTINEL_MAX_AI_TASKS", "5"))
-MOCK_AI = os.environ.get("SENTINEL_MOCK_AI", "false").lower() == "true"
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -139,8 +138,8 @@ class LocalOllamaEngine:
         """
         Executes chat inference strictly using llama3.2-vision:latest.
         """
-        if MOCK_AI or not self.ollama_online:
-            return {"response": "", "model": "rule_engine", "engine": "sentinel_local_rule_engine", "success": False}
+        if not self.ollama_online:
+            return {"response": "", "model": "offline", "engine": "local_ai", "success": False}
 
         candidate = model_override or self.active_model or "llama3.2-vision:latest"
         candidates = [candidate]
@@ -538,99 +537,23 @@ def retrieve_context(state: AgentState):
 
 async def analyze_threat_node(state: AgentState):
     payload = state["threat_payload"]
-    if not MOCK_AI:
-        try:
-            analysis = await local_ai_engine.analyze_threat(payload, state.get("historical_context", ""))
-            if analysis:
-                return {"ai_analysis": analysis}
-        except Exception as err:
-            logger.error(f"Local AI analysis call failed, falling back to local heuristic engine: {err}")
-
-    # High-fidelity Local Intelligence Rules Engine
-    ttype = str(payload.get("threat_type", "UNKNOWN")).upper()
-    mac = payload.get("attacker_mac", "DE:AD:BE:EF:00:01")
-    target = payload.get("target_mac", "FF:FF:FF:FF:FF:FF")
-    ch = payload.get("channel", 6)
-    rssi = payload.get("rssi", -55)
-    pkts = payload.get("packet_count") or payload.get("pkt_rate") or 150
-
-    if "DEAUTH" in ttype:
-        analysis = f"High-velocity 0x0C Deauthentication frame flood detected from rogue MAC {mac} targeting {target} on Channel {ch} ({rssi} dBm, {pkts} pkts/s). Active burst confirmed to force client disconnection for WPA 4-way handshake harvesting."
-    elif "TWIN" in ttype or "ROGUE" in ttype:
-        analysis = f"Unauthorized Beacon 0x08 broadcast spoofing network ESSID/BSSID characteristics from transmitter {mac} on Channel {ch} ({rssi} dBm). Critical Man-In-The-Middle (MitM) credential harvesting attack active."
-    elif "BEACON" in ttype:
-        analysis = f"Dense 0x08 Beacon frame saturation from transmitter {mac} on Channel {ch} ({rssi} dBm). Attacker is advertising pseudo-random SSIDs to overwhelm wireless station drivers and degrade AP association."
-    elif "PROBE" in ttype or "RECON" in ttype:
-        analysis = f"Automated 0x04 Probe Request burst detected from {mac} targeting Channel {ch} ({rssi} dBm). Wireless station reconnaissance and ESSID fingerprinting in progress."
-    elif "KARMA" in ttype:
-        analysis = f"KARMA probe-response exploitation active from {mac} on Channel {ch}. Rogue node is hijacking station preferred network lists (PNL) to coerce automatic associations."
-    elif "PMKID" in ttype:
-        analysis = f"Anomalous EAPOL frame 1 sniffing detected from {mac} on Channel {ch} ({rssi} dBm). Transmitter is attempting PMKID hash extraction for offline WPA key recovery."
-    elif "WPS" in ttype:
-        analysis = f"WPS Registrar M1/M2 brute-force handshake transactions detected from {mac} on Channel {ch}. Potential Pixie Dust entropy weakness exploitation."
-    else:
-        analysis = f"Anomalous 802.11 RF spectral burst ({ttype}) detected from {mac} on Channel {ch} ({rssi} dBm). Telemetry signature deviates from baseline profile."
-
-    return {"ai_analysis": analysis}
+    try:
+        analysis = await local_ai_engine.analyze_threat(payload, state.get("historical_context", ""))
+        if analysis:
+            return {"ai_analysis": analysis}
+    except Exception as err:
+        logger.error(f"Local AI analysis call failed: {err}")
+    return {"ai_analysis": "AI Analysis Failed or Unavailable."}
 
 async def generate_mitigation_node(state: AgentState):
     payload = state["threat_payload"]
-    if not MOCK_AI:
-        try:
-            mitigation = await local_ai_engine.generate_mitigation(payload, state.get("ai_analysis", ""))
-            if mitigation:
-                return {"mitigation_steps": mitigation}
-        except Exception as err:
-            logger.error(f"Local AI mitigation call failed, falling back to local engine: {err}")
-
-    # Local Tactical Mitigations
-    ttype = str(payload.get("threat_type", "UNKNOWN")).upper()
-    mac = payload.get("attacker_mac", "DE:AD:BE:EF:00:01")
-
-    if "DEAUTH" in ttype:
-        mitigation = (
-            "1. Enforce 802.11w Protected Management Frames (PMF / MFP) across all Access Points.\n"
-            f"2. Isolate and quarantine rogue MAC {mac} at switch port and RF controller boundary.\n"
-            "3. Enable dynamic frequency hopping to shift network traffic away from Channel 6."
-        )
-    elif "TWIN" in ttype or "ROGUE" in ttype:
-        mitigation = (
-            "1. Verify authorized BSSID cryptographic fingerprint against internal hardware registry.\n"
-            "2. Enforce WPA3-Enterprise with 802.1X certificate-based mutual authentication.\n"
-            f"3. Activate WIPS containment countermeasures against rogue transmitter {mac}."
-        )
-    elif "BEACON" in ttype:
-        mitigation = (
-            "1. Apply 802.11 management frame rate limiting at the AP firmware level.\n"
-            "2. Switch corporate SSID to Dynamic Channel Selection (DCS) to mitigate RF jamming.\n"
-            "3. Reject probe responses to non-whitelisted ESSID broadcasts."
-        )
-    elif "PROBE" in ttype or "RECON" in ttype:
-        mitigation = (
-            "1. Suppress broadcast SSID responses to hidden or unassociated probe requests.\n"
-            f"2. Add source {mac} to SOC SIEM high-priority watchlist.\n"
-            "3. Monitor authentication logs for follow-up association bursts."
-        )
-    elif "PMKID" in ttype:
-        mitigation = (
-            "1. Upgrade network security to WPA3-Personal (SAE) to eliminate PMKID hash derivation.\n"
-            "2. Rotate Pre-Shared Keys (PSK) with high-entropy passphrases (>= 20 characters).\n"
-            "3. Disable 802.11r Fast BSS Transition if not required."
-        )
-    elif "KARMA" in ttype:
-        mitigation = (
-            "1. Disable auto-connect to open networks on all enterprise mobile and laptop profiles.\n"
-            "2. Deploy 802.1X network profile MDM configurations to prevent PNL leakage.\n"
-            f"3. Blacklist MAC {mac} at firewall perimeter."
-        )
-    else:
-        mitigation = (
-            "1. Capture and inspect raw PCAP frame headers for 802.11 malformations.\n"
-            "2. Enforce strict MAC address whitelisting on internal VLANs.\n"
-            "3. Re-calibrate ESP32-S3 sniffer sensitivity thresholds."
-        )
-
-    return {"mitigation_steps": mitigation}
+    try:
+        mitigation = await local_ai_engine.generate_mitigation(payload, state.get("ai_analysis", ""))
+        if mitigation:
+            return {"mitigation_steps": mitigation}
+    except Exception as err:
+        logger.error(f"Local AI mitigation call failed: {err}")
+    return {"mitigation_steps": "AI Mitigation Failed or Unavailable."}
 
 threat_agent = None
 
@@ -1296,9 +1219,8 @@ async def root():
         "version": "3.5.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": uptime_sec,
-        "mock_ai": MOCK_AI,
         "local_ai": {
-            "enabled": not MOCK_AI,
+            "enabled": True,
             "host": local_ai_engine.host,
             "model": local_ai_engine.active_model,
             "last_successful_model": local_ai_engine.last_successful_model,
@@ -1531,56 +1453,42 @@ async def ai_agent_chat(req: AiChatRequest):
     query = req.query.strip()
     threat_type = req.context_threat_type or "GENERAL_SECURITY"
 
-    if not MOCK_AI:
-        try:
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Sentinel AI, an expert cybersecurity, DevSecOps and 802.11 wireless IDS analyst. "
-                        "Provide authoritative, actionable, concise, technical guidance on wireless defense, "
-                        "packet forensics, PMF 802.11w, Rogue AP containment, and enterprise network hardening."
-                    )
-                }
-            ]
-            if req.chat_history:
-                for msg in req.chat_history[-6:]:
-                    r = msg.get("role", "user")
-                    c = msg.get("content", "")
-                    if r in ["user", "assistant", "system"] and c:
-                        messages.append({"role": r, "content": c})
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Sentinel AI, an elite cybersecurity and DevSecOps analyst specializing in 802.11 wireless IDS and packet forensics. "
+                    "Your responses must be highly professional, authoritative, and strictly technical. "
+                    "Avoid filler text and conversational pleasantries. Provide clear, actionable intelligence, focusing on "
+                    "wireless defense, Rogue AP containment, enterprise network hardening, and cryptographic mitigations like PMF 802.11w. "
+                    "Structure your responses with bullet points or bold text where appropriate for readability."
+                )
+            }
+        ]
+        if req.chat_history:
+            for msg in req.chat_history[-6:]:
+                r = msg.get("role", "user")
+                c = msg.get("content", "")
+                if r in ["user", "assistant", "system"] and c:
+                    messages.append({"role": r, "content": c})
 
-            messages.append({"role": "user", "content": f"Context Threat: {threat_type}\nQuestion: {query}"})
-            images = [req.image_b64] if req.image_b64 else None
-            res = await local_ai_engine.chat(messages, images=images, timeout=30.0)
-            if res["success"] and res["response"]:
-                return {
-                    "response": res["response"],
-                    "engine": res["engine"],
-                    "model": res["model"]
-                }
-        except Exception as e:
-            logger.error(f"Chat API error: {e}")
-
-    # Fallback smart local cybersecurity advisor
-    q_lower = query.lower()
-    if "deauth" in q_lower or "0x0c" in q_lower:
-        resp = "Deauthentication attacks exploit unencrypted 802.11 management frames. The primary defense is enforcing 802.11w Protected Management Frames (PMF) on all APs and stations, making frame spoofing cryptographically impossible."
-    elif "evil twin" in q_lower or "rogue" in q_lower:
-        resp = "Evil Twin APs clone legitimate SSIDs and MACs. Defend by deploying WPA3-Enterprise with 802.1X EAP-TLS certificate validation, so client stations reject unauthorized access points without trusted root certs."
-    elif "beacon" in q_lower:
-        resp = "Beacon floods saturate wireless channels with fake SSIDs. Mitigate by enabling AP management frame rate-limiting and switching to Dynamic Frequency Selection (DFS) / 5GHz bands."
-    elif "pmkid" in q_lower or "wpa" in q_lower:
-        resp = "PMKID attacks harvest the first EAPOL frame RSN IE. Protect networks by upgrading to WPA3-SAE (Simultaneous Authentication of Equals), which eliminates offline dictionary attacks."
-    elif "esp32" in q_lower or "hardware" in q_lower:
-        resp = "The ESP32-S3 hardware sniffer runs promiscuous frame capture on Core 0 (zero packet loss) and drives the OLED / INMP441 microphone voice command listener on Core 1 (1 clap = Scan, 2 claps = Stop, 3 claps = Stats)."
-    else:
-        resp = f"Sentinel AI SOC Analyst: Regarding '{query}', our active forensic baseline shows nominal compliance for {threat_type}. Ensure 802.11w PMF is mandatory, monitor promiscuous frame counters, and isolate unknown MAC transmitters at the RF boundary."
+        messages.append({"role": "user", "content": f"Context Threat: {threat_type}\nQuestion: {query}"})
+        images = [req.image_b64] if req.image_b64 else None
+        res = await local_ai_engine.chat(messages, images=images, timeout=30.0)
+        if res["success"] and res["response"]:
+            return {
+                "response": res["response"],
+                "engine": res["engine"],
+                "model": res["model"]
+            }
+    except Exception as e:
+        logger.error(f"Chat API error: {e}")
 
     return {
-        "response": resp,
-        "engine": "sentinel_local_expert",
-        "model": "rule_heuristic"
+        "response": "Local AI Engine is offline or failed to respond. Please ensure Ollama is running.",
+        "engine": "local_ai",
+        "model": "offline"
     }
 
 

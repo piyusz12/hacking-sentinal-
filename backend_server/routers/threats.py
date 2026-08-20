@@ -115,18 +115,30 @@ async def run_simulation(
         end_time = datetime.utcnow() + timedelta(seconds=duration)
         packet_count = 0
         
+        # Map threat type enum properly
+        threat_type_map = {
+            "deauth": "DEAUTH_STORM",
+            "beacon_flood": "BEACON_SPAM", 
+            "probe_flood": "PROBE_FLOOD",
+            "evil_twin": "EVIL_TWIN",
+            "krack": "CUSTOM",
+            "unknown": "CUSTOM"
+        }
+        sim_type_str = threat_type_map.get(threat_type.value, "CUSTOM")
+        sim_threat_type = getattr(ThreatType, sim_type_str, ThreatType.UNKNOWN)
+        
+        # Trigger ESP32 hardware buzzer for this simulation
+        from backend_server.main import manager
+        await manager.broadcast_to_esp32({
+            "type": "simulate_alert",
+            "threat_type": sim_type_str,
+            "mac": "SIMULATED:AA:BB:CC:DD:EE",
+            "rssi": -42,
+            "channel": 6,
+            "packet_count": pps
+        })
+        
         while datetime.utcnow() < end_time and active_simulations.get(simulation_id):
-            # Map threat type enum properly
-            threat_type_map = {
-                "deauth": "DEAUTH_STORM",
-                "beacon_flood": "BEACON_SPAM", 
-                "probe_flood": "PROBE_FLOOD",
-                "evil_twin": "EVIL_TWIN",
-                "krack": "CUSTOM",
-                "unknown": "CUSTOM"
-            }
-            sim_type_str = threat_type_map.get(threat_type.value, "CUSTOM")
-            sim_threat_type = getattr(ThreatType, sim_type_str, ThreatType.UNKNOWN)
             
             # Generate simulated threat data
             simulated_threat = ThreatAlert(

@@ -209,51 +209,24 @@ void setRGB(uint8_t r, uint8_t g, uint8_t b) {
   pixels.show();
 }
 
-// Map threat type to RGB color matching the UI frontend preset palette
-void getThreatColor(const char* type, uint8_t &r, uint8_t &g, uint8_t &b) {
-  String t = String(type);
-  t.toUpperCase();
-  if (t.indexOf("DEAUTH") != -1)      { r=255; g=71;  b=87;  } // #ff4757
-  else if (t.indexOf("EVIL") != -1 ||
-           t.indexOf("TWIN") != -1)    { r=255; g=107; b=129; } // #ff6b81
-  else if (t.indexOf("BEACON") != -1)  { r=255; g=159; b=67;  } // #ff9f43
-  else if (t.indexOf("PROBE") != -1)   { r=76;  g=201; b=240; } // #4cc9f0
-  else if (t.indexOf("KARMA") != -1)   { r=123; g=97;  b=255; } // #7b61ff
-  else if (t.indexOf("PMKID") != -1)   { r=6;   g=214; b=160; } // #06d6a0
-  else                                 { r=255; g=0;   b=0;   } // Default red
-}
-
 void updateRGB() {
   unsigned long now = millis();
 
-  if (sysState == ST_BOOT) {
-    // Pulsing blue during boot
-    float intensity = (sin(now / 300.0) + 1.0) * 0.5 * 100.0;
-    setRGB(0, 0, (uint8_t)intensity);
-  }
-  else if (sysState == ST_SAFE) {
-    // Breathing green — calm heartbeat
-    float intensity = (sin(now / 1500.0) + 1.0) * 0.5 * 50.0 + 5.0;
-    setRGB(0, (uint8_t)intensity, 0);
-  }
-  else if (sysState == ST_ALERT) {
-    // Police strobe: Threat color ↔ OFF at 50ms (very aggressive)
+  if (sysState == ST_ALERT) {
+    // Strobe red for attack
     if (now - last_rgb_update_ms > 50) {
       rgb_strobe_state = !rgb_strobe_state;
       if (rgb_strobe_state) {
-        uint8_t r, g, b;
-        getThreatColor(g_alert_type, r, g, b);
-        setRGB(r, g, b);
+        setRGB(255, 0, 0); // Only red for attack
       } else {
         setRGB(0, 0, 0);
       }
       last_rgb_update_ms = now;
     }
-  }
-  else if (sysState == ST_MONITORING) {
-    // Fast pulsing orange — AI processing
-    float intensity = (exp(sin(now / 400.0 * PI)) - 0.36787944) * 108.0;
-    setRGB((uint8_t)intensity, (uint8_t)(intensity * 0.4), 0);
+  } else {
+    // Breathing blue for safe, boot, and monitoring
+    float intensity = (sin(now / 1500.0) + 1.0) * 0.5 * 50.0 + 5.0;
+    setRGB(0, 0, (uint8_t)intensity);
   }
 }
 

@@ -9,7 +9,7 @@ import {
   TrendingDown, Database, BarChart3, ChevronRight, RefreshCw,
   MemoryStick, Radio, ShieldAlert, Zap, WifiOff, Activity,
   Code, Play, Send, Bot, Download,
-  Power, Usb, Volume2, Sparkles
+  Power, Usb, Volume2, Sparkles, Trash2
 } from 'lucide-react';
 import './index.css';
 
@@ -495,9 +495,27 @@ function App() {
   const [serialConnected, setSerialConnected] = useState(false);
 
   // Settings states
-  const [darkMode, setDarkMode] = useState(true);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
-  const [sensitivity, setSensitivity] = useState(75);
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('sentinel_darkMode');
+    return saved !== null ? JSON.parse(saved) : true;
+  });
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    const saved = localStorage.getItem('sentinel_notifications');
+    return saved !== null ? JSON.parse(saved) : false;
+  });
+  const [sensitivity, setSensitivity] = useState(() => {
+    const saved = localStorage.getItem('sentinel_sensitivity');
+    return saved !== null ? parseInt(saved) : 75;
+  });
+  const [saveText, setSaveText] = useState('Save Changes');
+
+  const saveSettings = useCallback(() => {
+    localStorage.setItem('sentinel_darkMode', JSON.stringify(darkMode));
+    localStorage.setItem('sentinel_notifications', JSON.stringify(notificationsEnabled));
+    localStorage.setItem('sentinel_sensitivity', sensitivity.toString());
+    setSaveText('Saved!');
+    setTimeout(() => setSaveText('Save Changes'), 2000);
+  }, [darkMode, notificationsEnabled, sensitivity]);
 
   useEffect(() => {
     if (notificationsEnabled && 'Notification' in window) {
@@ -519,6 +537,16 @@ function App() {
       await fetch(`${BACKEND_URL}/api/threats/clear`, { method: 'POST' });
     } catch {
       // Ignore network errors on clear
+    }
+  }, []);
+
+  const clearThreatLog = useCallback(async () => {
+    setThreatFeed([]);
+    setThreatCount(0);
+    try {
+      await fetch(`${BACKEND_URL}/api/threats/clear`, { method: 'POST' });
+    } catch {
+      // Ignore
     }
   }, []);
 
@@ -565,8 +593,11 @@ function App() {
       }, 6000);
       
       if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification('🛡️ AI Analyst Report', {
-          body: `Threat mitigation playbook generated for ${newReport.threat}.`
+        // Strip markdown and extract a concise mitigation summary from the AI report
+        const rawMitigation = newReport.mitigation || `Threat mitigation playbook generated for ${newReport.threat}.`;
+        const cleanMitigation = rawMitigation.replace(/[*_#`~]/g, '').trim().substring(0, 150) + (rawMitigation.length > 150 ? '...' : '');
+        new Notification('🛡️ AI Mitigation Playbook', {
+          body: cleanMitigation
         });
       }
     } else if (lastMessage.type === 'esp32_voice_event') {
@@ -695,6 +726,23 @@ function App() {
 
   // Toggle Device Trust
   const toggleDeviceTrust = (mac) => {
+    const targetDevice = devicesList.find(d => d.mac === mac);
+    if (targetDevice && targetDevice.trusted) {
+      try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(800, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.15);
+      } catch (e) {
+        console.error("Audio beep failed:", e);
+      }
+    }
     setDevicesList(prev => prev.map(d => d.mac === mac ? { ...d, trusted: !d.trusted } : d));
   };
 
@@ -1199,8 +1247,8 @@ function App() {
                   <button className="panel-tab" onClick={exportCsv} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Download size={13} /> Export CSV
                   </button>
-                  <button className="panel-tab" onClick={() => setThreatFeed([])}>
-                    Clear Feed
+                  <button className="panel-tab" onClick={clearThreatLog} style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--accent-red)' }}>
+                    <Trash2 size={13} /> Clear Log
                   </button>
                 </div>
               </div>
@@ -1817,8 +1865,8 @@ function App() {
               </div>
               
               <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end', gap: '12px', borderTop: '1px solid var(--border-strong)', paddingTop: '20px' }}>
-                <button style={{ background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>Cancel</button>
-                <button style={{ background: 'linear-gradient(135deg, var(--accent-purple), var(--accent-cyan))', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s', boxShadow: 'var(--shadow-glow-purple)' }}>Save Changes</button>
+                <button onClick={() => setActiveNav('dashboard')} style={{ background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>Cancel</button>
+                <button onClick={saveSettings} style={{ background: 'linear-gradient(135deg, var(--accent-purple), var(--accent-cyan))', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s', boxShadow: 'var(--shadow-glow-purple)' }}>{saveText}</button>
               </div>
             </div>
           </div>
