@@ -1,64 +1,36 @@
 ```
-# Environment variables
-.env
-.env.local
-.env.*
+# Arduino build artifacts
+*.hex
+*.bin
+*.elf
+*.map
+*.d
+*.o
+build/
+bin/
+.hex
+.bin
+.elf
+.map
 
 # Dependencies
-.venv/
-venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+libraries/
 
-# Logs and temporary files
+# Logs and temp files
 *.log
 *.tmp
 *.swp
-*.swo
 
-# Editor/IDE files
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
 .vscode/
 .idea/
 
 # OS generated files
 .DS_Store
 Thumbs.db
-
-# Python specific
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Coverage reports
-.coverage
-htmlcov/
-.coverage.*
-.cache
-
-# Testing
-.pytest_cache/
-.mypy_cache/
-.hypothesis/
-
-# Docker
-.dockerenv
 ```

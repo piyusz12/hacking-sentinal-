@@ -172,3 +172,25 @@ class ConfigurationError(SentinelException):
             error_code="CONFIGURATION_ERROR",
             details=details
         )
+class InvalidFrameDataError(SentinelException):
+    """Raised when received frame data is malformed or invalid"""
+    
+    def __init__(self, message: str = "Invalid frame data", details: Optional[Dict] = None):
+        super().__init__(
+            message=message,
+            status_code=400,
+            error_code="INVALID_FRAME_DATA",
+            details=details
+        )
+
+
+class ThreatSimulationError(SentinelException):
+    """Raised when threat simulation fails"""
+    
+    def __init__(self, message: str = "Failed to simulate threat", details: Optional[Dict] = None):
+        super().__init__(
+            message=message,
+            status_code=500,
+            error_code="SIMULATION_ERROR",
+            details=details
+        )
