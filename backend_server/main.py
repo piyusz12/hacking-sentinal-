@@ -13,6 +13,8 @@ import io
 import asyncio
 import logging
 import secrets
+import random
+import xml.sax.saxutils
 from typing import TypedDict, List, Optional, Union, Dict, Any
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -22,6 +24,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPExceptio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
+import subprocess
+import platform
 
 # System metrics
 try:
@@ -92,6 +96,14 @@ class LocalOllamaEngine:
     High-Performance Local AI Engine powered by Ollama.
     Dedicated exclusively to llama3.2-vision:latest for 802.11 DevSecOps & RF telemetry analysis.
     """
+
+    @property
+    def engine_display_name(self) -> str:
+        """Canonical display name for the active AI engine — used across all API responses."""
+        if self.ollama_online:
+            model = self.last_successful_model or self.active_model
+            return f"Local Ollama ({model}) + LangGraph"
+        return "Sentinel Local Forensic AI Engine"
     def __init__(self, host: str = OLLAMA_HOST, default_model: str = DEFAULT_LOCAL_MODEL):
         self.host = host
         self.default_model = default_model
@@ -351,6 +363,20 @@ class RawFrameRequest(BaseModel):
     rssi: Optional[int] = -50
 
 
+class WiFiConnectRequest(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=64)
+    password: Optional[str] = Field(default="", max_length=64)
+
+
+class WiFiNetworkInfo(BaseModel):
+    ssid: str
+    bssid: Optional[str] = ""
+    channel: Optional[int] = 0
+    rssi: Optional[int] = -100
+    security: Optional[str] = "UNKNOWN"
+    connected: bool = False
+
+
 # --- In-Memory State & Buffers ---
 threat_history: List[Dict[str, Any]] = []
 system_start_time = datetime.now(timezone.utc)
@@ -371,6 +397,23 @@ serial_bridge_state = {
     "packets_received": 0,
     "last_error": None,
     "task": None
+}
+
+# WiFi connection state (host PC)
+wifi_state = {
+    "connected": False,
+    "ssid": "",
+    "bssid": "",
+    "channel": 0,
+    "rssi": 0,
+    "ip": "",
+    "gateway": "",
+    "dns": "",
+    "security": "",
+    "interface": "",
+    "last_scan": [],
+    "network_devices": [],
+    "last_error": None
 }
 
 # --- WebSocket Connection Manager ---
@@ -415,14 +458,32 @@ class ConnectionManager:
         if not self.dashboard_clients:
             return
         payload_text = fast_dumps(message)
-        disconnected = []
-        for client in self.dashboard_clients:
+        # P1 fix: parallel broadcast via asyncio.gather — one slow client can't block others
+        async def _safe_send(client):
             try:
                 await client.send_text(payload_text)
+                return True
             except Exception:
-                disconnected.append(client)
+                return False
+        results = await asyncio.gather(*[_safe_send(c) for c in self.dashboard_clients], return_exceptions=True)
+        disconnected = [c for c, ok in zip(self.dashboard_clients, results) if ok is False or isinstance(ok, Exception)]
         for dead in disconnected:
             self.disconnect_dashboard(dead)
+
+    async def broadcast_to_esp32(self, message: dict):
+        if not self.esp32_clients:
+            return
+        payload_text = fast_dumps(message)
+        async def _safe_send(client):
+            try:
+                await client.send_text(payload_text)
+                return True
+            except Exception:
+                return False
+        results = await asyncio.gather(*[_safe_send(c) for c in self.esp32_clients], return_exceptions=True)
+        disconnected = [c for c, ok in zip(self.esp32_clients, results) if ok is False or isinstance(ok, Exception)]
+        for dead in disconnected:
+            self.disconnect_esp32(dead)
 
 
 manager = ConnectionManager(
@@ -592,10 +653,14 @@ def compile_langgraph_agent():
 
 
 # --- AI Pipeline Runner ---
+# Thread-safe lock for the shared counter (C1 fix: prevents race condition)
+_threat_count_lock = asyncio.Lock()
+
 async def run_ai_pipeline(payload: dict):
     global total_threats_detected
     async with ai_semaphore:
-        total_threats_detected += 1
+        async with _threat_count_lock:
+            total_threats_detected += 1
         try:
             logger.info(f"AI Pipeline Processing: {payload.get('threat_type')} from {payload.get('attacker_mac')}")
             initial_state: AgentState = {
@@ -615,7 +680,7 @@ async def run_ai_pipeline(payload: dict):
                 s3 = await generate_mitigation_node(initial_state)
                 final_state = {**initial_state, **s3}
 
-            active_model = local_ai_engine.last_successful_model or local_ai_engine.active_model
+            active_model_name = local_ai_engine.engine_display_name
             ai_report = {
                 "type": "ai_report",
                 "threat": payload.get("threat_type"),
@@ -627,13 +692,14 @@ async def run_ai_pipeline(payload: dict):
                 "packet_count": payload.get("packet_count") or payload.get("pkt_rate") or 150,
                 "analysis": final_state["ai_analysis"],
                 "mitigation": final_state["mitigation_steps"],
-                "ai_engine": f"Local Ollama ({active_model}) + LangGraph" if local_ai_engine.ollama_online else "Sentinel Local Forensic AI Engine",
+                "ai_engine": active_model_name,
                 "analyzed_at": datetime.now(timezone.utc).isoformat()
             }
 
             threat_history.insert(0, ai_report)
+            # C2 fix: properly trim to 200 entries (old code only popped 1, could leak under burst load)
             if len(threat_history) > 200:
-                threat_history.pop()
+                del threat_history[200:]
 
             # Dynamically track rogue attacker device in registry
             atk_mac = (payload.get("attacker_mac") or "").upper()
@@ -648,7 +714,7 @@ async def run_ai_pipeline(payload: dict):
                         break
                 if not found:
                     devices_registry.append({
-                        "id": len(devices_registry) + 1,
+                        "id": max((d['id'] for d in devices_registry), default=0) + 1,
                         "mac": atk_mac,
                         "ip": "10.0.1.???",
                         "name": f"Rogue {payload.get('threat_type')}",
@@ -660,6 +726,12 @@ async def run_ai_pipeline(payload: dict):
                     })
 
             await manager.broadcast_to_dashboards(ai_report)
+            # Bidirectional hardware feedback: Notify ESP32-S3 OLED & MAX98357A speaker
+            await manager.broadcast_to_esp32({
+                "type": "ai_report",
+                "threat_type": payload.get("threat_type"),
+                "summary": str(final_state.get("ai_analysis", ""))[:120]
+            })
             logger.info(f"AI Analysis Broadcasted successfully for {payload.get('threat_type')}")
 
         except Exception as exc:
@@ -673,6 +745,8 @@ async def run_ai_pipeline(payload: dict):
 
 
 # --- Authentication Helper ---
+# SECURITY: Dev-mode bypass — in production, set SENTINEL_WS_TOKEN env var and enforce strict check.
+# Currently allows unauthenticated connections (token=None) for local development.
 def verify_ws_token(token: Optional[str]) -> bool:
     if not token:
         return True  # Dev mode allows seamless connect
@@ -738,11 +812,473 @@ async def background_serial_reader(port: str, baud_rate: int):
         serial_bridge_state["last_error"] = str(e)
     finally:
         serial_bridge_state["is_running"] = False
-        try:
-            ser.close()
-        except Exception:
-            pass
+        # P7 fix: guard ser.close() — ser may not be assigned if Serial() constructor raised
+        if 'ser' in locals():
+            try:
+                ser.close()
+            except Exception:
+                pass
         logger.info(f"🔌 Serial bridge on {port} stopped.")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   ATTACK ENCYCLOPEDIA — All 802.11 WiFi Attack Types with Forensic Details
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ATTACK_ENCYCLOPEDIA: Dict[str, Dict[str, Any]] = {
+    "DEAUTH_STORM": {
+        "name": "Deauthentication Storm (0x0C)",
+        "frame_type": "Management (Type 0x00, Subtype 0x0C)",
+        "severity": 5,
+        "category": "Denial of Service / Handshake Harvesting",
+        "description": (
+            "A high-velocity flood of 802.11 Deauthentication management frames. The attacker "
+            "sends spoofed 0x0C frames to force client stations to disconnect from their Access Point. "
+            "This is the most common precursor to Evil Twin and PMKID attacks because it forces "
+            "clients to re-associate, exposing the WPA 4-way handshake."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel's ESP32-S3 Core 0 runs in promiscuous mode capturing ALL raw 802.11 frames. "
+            "When the sniffer callback detects frame_type=0x00, subtype=0x0C, it increments a "
+            "deauth counter inside an ISR-safe portMUX critical section. If the counter exceeds "
+            "DEAUTH_THRESHOLD (5 frames) within a 3-second detection window, a ThreatAlert struct "
+            "is pushed to the FreeRTOS queue via xQueueSendFromISR(). Core 1's loop() drains this "
+            "queue, triggers the OLED alert screen, sounds the MAX98357A alarm, and sends the alert "
+            "JSON over WebSocket to the FastAPI backend for LangGraph AI analysis."
+        ),
+        "real_world_tools": ["aireplay-ng --deauth", "mdk3/mdk4", "Flipper Zero WiFi devboard"],
+        "defense": "Enable 802.11w Protected Management Frames (PMF/MFP) on all APs and clients.",
+        "sim_defaults": {"mac": "DE:AD:BE:EF:00:01", "channel": 6, "rssi": -42, "pkt_rate": 1850}
+    },
+    "EVIL_TWIN": {
+        "name": "Evil Twin Rogue Access Point",
+        "frame_type": "Management Beacon (Type 0x00, Subtype 0x08)",
+        "severity": 5,
+        "category": "Man-in-the-Middle / Credential Harvesting",
+        "description": (
+            "The attacker creates a rogue AP that clones the SSID and BSSID of a legitimate network. "
+            "By broadcasting stronger signal beacons, it lures clients into connecting to the fake AP. "
+            "Once associated, all traffic passes through the attacker who can capture credentials, "
+            "inject malicious content, or perform SSL stripping."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel detects Evil Twin by monitoring beacon frames (subtype 0x08) and comparing "
+            "BSSID signatures against its whitelist registry. When a beacon advertises a known SSID "
+            "from an unregistered BSSID MAC address, or when RSSI suddenly spikes (indicating a "
+            "closer, more powerful rogue transmitter), the system flags it as an Evil Twin. The "
+            "LangGraph AI pipeline cross-references the FAISS vector database for historical "
+            "signatures and generates tactical containment recommendations."
+        ),
+        "real_world_tools": ["hostapd-wpe", "Fluxion", "WiFi-Pumpkin3", "bettercap"],
+        "defense": "Deploy WPA3-Enterprise with 802.1X EAP-TLS certificate mutual authentication.",
+        "sim_defaults": {"mac": "E0:5A:1B:99:33:AA", "channel": 6, "rssi": -35, "pkt_rate": 920}
+    },
+    "BEACON_FLOOD": {
+        "name": "Beacon Frame Saturation (0x08)",
+        "frame_type": "Management Beacon (Type 0x00, Subtype 0x08)",
+        "severity": 4,
+        "category": "Denial of Service / Wireless Stack Exhaustion",
+        "description": (
+            "The attacker broadcasts thousands of fake beacon frames with pseudo-random SSIDs. "
+            "This overwhelms nearby Wi-Fi clients and access points, causing their wireless stack "
+            "to crash or become unresponsive. Victims see hundreds of fake networks in their WiFi "
+            "scanner, unable to find or connect to legitimate networks."
+        ),
+        "how_sentinel_intercepts": (
+            "The promiscuous sniffer on Core 0 tracks the total packet rate across all channels. "
+            "When the aggregate management frame rate exceeds DOS_PKT_THRESHOLD (600 pkts/sec), "
+            "the telemetry module in sendTelemetry() generates a DOS_FLOOD alert. The system "
+            "correlates the source MAC distribution to determine if it's a single attacker or "
+            "distributed flood, and the AI engine provides channel migration recommendations."
+        ),
+        "real_world_tools": ["mdk3 b (beacon flood)", "mdk4", "Scapy beacon injector"],
+        "defense": "AP management frame rate-limiting + Dynamic Frequency Selection (DFS).",
+        "sim_defaults": {"mac": "AA:11:BB:22:CC:33", "channel": 1, "rssi": -48, "pkt_rate": 3200}
+    },
+    "PROBE_STORM": {
+        "name": "Probe Request Reconnaissance Burst (0x04)",
+        "frame_type": "Management Probe Request (Type 0x00, Subtype 0x04)",
+        "severity": 3,
+        "category": "Reconnaissance / Station Fingerprinting",
+        "description": (
+            "Automated rapid-fire probe requests scanning for all nearby wireless networks. "
+            "The attacker maps ESSID names, BSSID addresses, supported data rates, and station "
+            "MAC fingerprints. This reconnaissance phase typically precedes targeted attacks like "
+            "Evil Twin or KARMA — the attacker needs to know which networks exist first."
+        ),
+        "how_sentinel_intercepts": (
+            "Core 0 ISR callback detects frame_type=0x00, subtype=0x04 probe requests. A dedicated "
+            "cnt_probe counter is incremented inside portMUX. When PROBE_THRESHOLD (25 frames) is "
+            "reached within the 3s detection window, a PROBE_FLOOD ThreatAlert is queued. The backend "
+            "AI analyzes the source MAC OUI (manufacturer prefix) to identify the attacker device type "
+            "and adds it to the SOC watchlist."
+        ),
+        "real_world_tools": ["airodump-ng", "Kismet", "WiFi Analyzer", "hcxdumptool"],
+        "defense": "Suppress broadcast SSID responses to unknown probe requests.",
+        "sim_defaults": {"mac": "8C:3B:AD:77:88:99", "channel": 11, "rssi": -58, "pkt_rate": 640}
+    },
+    "KARMA_ATTACK": {
+        "name": "KARMA Preferred Network List Hijack",
+        "frame_type": "Management Probe Response (Type 0x00, Subtype 0x05)",
+        "severity": 5,
+        "category": "Rogue AP / Auto-Association Exploitation",
+        "description": (
+            "KARMA exploits the client's Preferred Network List (PNL). Every WiFi device remembers "
+            "networks it has connected to and periodically sends probe requests for them. A KARMA "
+            "attacker responds affirmatively to ALL probe requests — pretending to be your home WiFi, "
+            "office WiFi, or any network the client has ever used. The client auto-connects, thinking "
+            "it found a trusted network."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel monitors probe responses (subtype 0x05) and detects when a single MAC address "
+            "responds to multiple different SSID probe requests — a signature KARMA behavior. Normal "
+            "APs only respond to their own SSID. The AI pipeline flags transmitters that respond to "
+            ">3 different SSIDs within a detection window as KARMA-capable rogue nodes and triggers "
+            "a critical alert with PNL protection recommendations."
+        ),
+        "real_world_tools": ["hostapd-mana (KARMA mode)", "WiFi-Pumpkin3", "Pineapple Mark VII"],
+        "defense": "Disable auto-connect to open networks on all devices. Deploy MDM profiles.",
+        "sim_defaults": {"mac": "FA:88:22:CC:55:11", "channel": 6, "rssi": -40, "pkt_rate": 810}
+    },
+    "PMKID_CAPTURE": {
+        "name": "PMKID Hash Extraction (EAPOL Frame 1)",
+        "frame_type": "Data / EAPOL (Type 0x02, Key Frame 1)",
+        "severity": 5,
+        "category": "Credential Theft / Offline Brute Force",
+        "description": (
+            "The attacker captures the PMKID (Pairwise Master Key Identifier) from the RSN IE "
+            "(Robust Security Network Information Element) in the first EAPOL frame of the WPA "
+            "4-way handshake. Unlike traditional handshake capture, PMKID extraction requires only "
+            "a single frame and does NOT need a client to be connected. The attacker can then perform "
+            "offline dictionary/brute-force attacks against the hash using hashcat."
+        ),
+        "how_sentinel_intercepts": (
+            "The sniffer monitors data frames (type 0x02) for EAPOL authentication patterns. When "
+            "anomalous EAPOL frame 1 transactions are detected from an unrecognized MAC without a "
+            "corresponding client association, the system flags it as a PMKID capture attempt. The "
+            "LangGraph pipeline queries the FAISS vector DB for PMKID attack signatures and generates "
+            "a mitigation playbook including PSK rotation and WPA3-SAE upgrade recommendations."
+        ),
+        "real_world_tools": ["hcxdumptool + hcxpcapngtool", "hashcat -m 22000", "airgeddon"],
+        "defense": "Upgrade to WPA3-SAE (eliminates PMKID derivation). Rotate PSK with 20+ chars.",
+        "sim_defaults": {"mac": "B4:EE:2B:10:99:44", "channel": 6, "rssi": -50, "pkt_rate": 450}
+    },
+    "WPS_BRUTE_FORCE": {
+        "name": "WPS PIN Brute Force / Pixie Dust",
+        "frame_type": "EAP-WSC (M1/M2 Registration Protocol)",
+        "severity": 4,
+        "category": "Authentication Bypass / Key Recovery",
+        "description": (
+            "Wi-Fi Protected Setup (WPS) uses an 8-digit PIN split into two halves verified "
+            "independently, reducing the keyspace to ~11,000 combinations. The Pixie Dust attack "
+            "exploits weak random number generation in the WPS M3 nonce to recover the PIN "
+            "in seconds without brute force. Either method reveals the full WPA2 Pre-Shared Key."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel detects rapid sequential EAP-WSC M1/M2 registration transactions from the "
+            "same MAC address — a clear brute-force signature. Normal WPS uses single attempts; "
+            "brute force generates 10+ attempts per minute. The system also monitors for Pixie Dust "
+            "entropy analysis patterns and alerts when WPS registrar activity exceeds normal thresholds."
+        ),
+        "real_world_tools": ["reaver", "bully", "pixiewps (Pixie Dust)", "wifite2"],
+        "defense": "Disable WPS on all access points. Use WPA3 with SAE handshake.",
+        "sim_defaults": {"mac": "22:44:66:88:AA:CC", "channel": 6, "rssi": -52, "pkt_rate": 280}
+    },
+    "ROGUE_AP": {
+        "name": "Unauthorized Rogue Access Point",
+        "frame_type": "Management Beacon (Type 0x00, Subtype 0x08)",
+        "severity": 4,
+        "category": "Network Infiltration / Perimeter Bypass",
+        "description": (
+            "An unauthorized wireless access point plugged into the corporate Ethernet LAN. Unlike "
+            "Evil Twin (which is wireless-only), a Rogue AP physically bridges the wired network, "
+            "bypassing all perimeter firewalls and NAC controls. An employee might install one for "
+            "convenience, or an attacker could plant one during physical access."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel maintains a BSSID whitelist of all authorized access points. Any beacon frame "
+            "with an unknown BSSID advertising on the local network is flagged as a potential Rogue AP. "
+            "The system cross-references the transmitter's OUI against known enterprise AP vendors "
+            "(Cisco, Aruba, Ubiquiti) — consumer-grade OUIs on a corporate network trigger high-severity "
+            "alerts. The AI generates WIPS containment countermeasure playbooks."
+        ),
+        "real_world_tools": ["Any consumer WiFi router", "Raspberry Pi + hostapd", "GL.iNet travel router"],
+        "defense": "BSSID fingerprint whitelist + WIPS with auto-containment. 802.1X port security.",
+        "sim_defaults": {"mac": "C0:FF:EE:BA:D0:01", "channel": 11, "rssi": -38, "pkt_rate": 520}
+    },
+    "DISASSOC_FLOOD": {
+        "name": "Disassociation Frame Flood (0x0A)",
+        "frame_type": "Management (Type 0x00, Subtype 0x0A)",
+        "severity": 4,
+        "category": "Denial of Service",
+        "description": (
+            "Similar to deauthentication but uses disassociation frames (subtype 0x0A). While deauth "
+            "terminates the authentication state, disassociation terminates the association state. "
+            "The practical effect is the same — clients are kicked off the network. Some legacy "
+            "clients handle disassociation differently, making this a complementary attack vector."
+        ),
+        "how_sentinel_intercepts": (
+            "Core 0's ISR monitors for frame_type=0x00, subtype=0x0A disassociation frames. The "
+            "detection mechanism mirrors deauth detection: threshold-based counting within the 3-second "
+            "window with ISR-safe portMUX critical sections. Alerts are queued via xQueueSendFromISR() "
+            "and processed by Core 1 with OLED display + speaker alarm + WebSocket notification."
+        ),
+        "real_world_tools": ["mdk3 d (disassociation)", "aireplay-ng -0 (also sends disassoc)", "Scapy"],
+        "defense": "802.11w PMF (protects both deauth and disassoc frames cryptographically).",
+        "sim_defaults": {"mac": "BA:AD:F0:0D:13:37", "channel": 1, "rssi": -45, "pkt_rate": 1200}
+    },
+    "AUTH_FLOOD": {
+        "name": "Authentication Frame Flood (0x0B)",
+        "frame_type": "Management (Type 0x00, Subtype 0x0B)",
+        "severity": 3,
+        "category": "Denial of Service / AP Resource Exhaustion",
+        "description": (
+            "Floods the target AP with fake authentication request frames. Each authentication "
+            "request forces the AP to allocate state tracking resources. With thousands of fake "
+            "auth requests per second, the AP's association table fills up, preventing legitimate "
+            "clients from connecting. This is essentially a SYN flood equivalent for WiFi."
+        ),
+        "how_sentinel_intercepts": (
+            "The promiscuous sniffer detects authentication frame bursts (subtype 0x0B) from multiple "
+            "spoofed source MACs targeting a single BSSID. The telemetry module's rate-based DoS "
+            "detection triggers when management frame rates exceed normal baselines. The AI analyzes "
+            "MAC randomization patterns to confirm automated attack tooling."
+        ),
+        "real_world_tools": ["mdk3 a (authentication flood)", "mdk4", "Scapy auth injector"],
+        "defense": "AP authentication rate limiting. Client association limits. MAC ACLs.",
+        "sim_defaults": {"mac": "11:22:33:44:55:66", "channel": 6, "rssi": -55, "pkt_rate": 980}
+    },
+    "EAPOL_REPLAY": {
+        "name": "EAPOL 4-Way Handshake Replay",
+        "frame_type": "Data / EAPOL (Type 0x02, Key Frames 1-4)",
+        "severity": 5,
+        "category": "Key Reinstallation / KRACK Attack",
+        "description": (
+            "The attacker captures and replays EAPOL messages from the WPA2 4-way handshake to force "
+            "key reinstallation on the client (KRACK — Key Reinstallation Attack). By replaying "
+            "message 3 of the handshake, the attacker resets the nonce counter, allowing decryption "
+            "of encrypted traffic and injection of forged packets."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel's data frame analysis detects duplicate EAPOL message sequence numbers — the "
+            "hallmark of replay attacks. Normal handshakes use strictly incrementing nonces; replayed "
+            "messages show nonce resets. The system alerts when EAPOL message 3 retransmissions exceed "
+            "normal AP retry behavior (typically 1-2 retries vs. attacker's 10+ retries)."
+        ),
+        "real_world_tools": ["krackattacks scripts", "wpa_supplicant exploit", "hostapd-wpe"],
+        "defense": "Patch all clients and APs for KRACK (CVE-2017-13077). Upgrade to WPA3.",
+        "sim_defaults": {"mac": "77:88:99:AA:BB:CC", "channel": 6, "rssi": -48, "pkt_rate": 340}
+    },
+    "RF_JAMMING": {
+        "name": "RF Spectrum Jamming / Channel Saturation",
+        "frame_type": "Physical Layer (PHY) / Non-802.11 RF Noise",
+        "severity": 5,
+        "category": "Physical Layer Denial of Service",
+        "description": (
+            "The attacker uses a wideband RF transmitter to flood the 2.4GHz or 5GHz spectrum "
+            "with noise, making all WiFi communication impossible on the affected channels. Unlike "
+            "protocol-level attacks, jamming operates at the physical layer and cannot be prevented "
+            "by 802.11w PMF or any software-based defense. Only spectrum monitoring and physical "
+            "locate-and-remove can counter it."
+        ),
+        "how_sentinel_intercepts": (
+            "Sentinel detects jamming through indirect indicators: sudden drop in legitimate packet "
+            "reception rate, extreme increase in CRC errors, WiFi RSSI readings showing abnormal "
+            "noise floor elevation, and ESP32 heap/connectivity instability. The system correlates "
+            "these metrics to distinguish jamming from normal interference. The AI generates "
+            "channel migration and spectrum analysis recommendations."
+        ),
+        "real_world_tools": ["HackRF One + GNU Radio", "WiFi Deauther (continuous mode)", "Signal generators"],
+        "defense": "Spectrum monitoring + physical security. DFS channel migration. 5GHz/6GHz migration.",
+        "sim_defaults": {"mac": "FF:FF:FF:FF:FF:FF", "channel": 6, "rssi": -20, "pkt_rate": 5000}
+    }
+}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   AUTO-SIMULATION ENGINE — Continuous Realistic WiFi Attack Generation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class AutoSimulationEngine:
+    """
+    Generates continuous, realistic WiFi attack simulations for demo/hackathon mode.
+    Each attack uses randomized but plausible parameters (MAC, channel, RSSI, packet rate).
+    Attacks are fed through the full LangGraph AI pipeline → Dashboard broadcast.
+    """
+    def __init__(self):
+        self.is_running: bool = False
+        self._task: Optional[asyncio.Task] = None
+        self.interval_seconds: float = 8.0  # Time between simulated attacks
+        self.attacks_generated: int = 0
+        self.attack_sequence: List[str] = []  # History of generated attack types
+        self.started_at: Optional[str] = None
+
+    def _random_mac(self) -> str:
+        """Generate a random but realistic-looking MAC address."""
+        oui_prefixes = [
+            "DE:AD:BE", "E0:5A:1B", "AA:11:BB", "8C:3B:AD",
+            "FA:88:22", "B4:EE:2B", "22:44:66", "C0:FF:EE",
+            "BA:AD:F0", "11:22:33", "77:88:99", "A4:C3:F0"
+        ]
+        oui = random.choice(oui_prefixes)
+        suffix = ":".join(f"{random.randint(0, 255):02X}" for _ in range(3))
+        return f"{oui}:{suffix}"
+
+    def _generate_attack(self) -> dict:
+        """Generate a single realistic attack scenario from the encyclopedia."""
+        attack_type = random.choice(list(ATTACK_ENCYCLOPEDIA.keys()))
+        attack_info = ATTACK_ENCYCLOPEDIA[attack_type]
+        defaults = attack_info["sim_defaults"]
+
+        # Randomize parameters within realistic ranges
+        channel = random.choice([1, 3, 6, 9, 11])
+        rssi_base = defaults.get("rssi", -50)
+        rssi = rssi_base + random.randint(-10, 10)
+        rssi = max(-95, min(-15, rssi))
+
+        pkt_base = defaults.get("pkt_rate", 500)
+        pkt_rate = int(pkt_base * random.uniform(0.5, 2.0))
+
+        return {
+            "sensor_id": "SENTINEL-AUTO-SIM",
+            "threat_type": attack_type,
+            "attacker_mac": self._random_mac(),
+            "target_mac": random.choice([
+                "FF:FF:FF:FF:FF:FF",
+                "A4:C3:F0:12:34:56",
+                "D8:BB:C1:98:76:54",
+                "FC:EC:DA:55:44:33"
+            ]),
+            "channel": channel,
+            "rssi": rssi,
+            "packet_count": pkt_rate,
+            "pkt_rate": pkt_rate,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "simulation": True
+        }
+
+    async def _run_loop(self):
+        """Main simulation loop — generates attacks at configured interval."""
+        logger.info(f"🎯 Auto-Simulation Engine STARTED (interval={self.interval_seconds}s)")
+        self.started_at = datetime.now(timezone.utc).isoformat()
+
+        # Cycle through ALL attack types first, then randomize
+        all_types = list(ATTACK_ENCYCLOPEDIA.keys())
+        random.shuffle(all_types)
+        cycle_index = 0
+
+        while self.is_running:
+            try:
+                # First pass: cycle through every attack type so user sees all of them
+                if cycle_index < len(all_types):
+                    attack_type = all_types[cycle_index]
+                    payload = self._generate_attack()
+                    payload["threat_type"] = attack_type  # Override with cycle type
+                    cycle_index += 1
+                else:
+                    payload = self._generate_attack()
+
+                self.attacks_generated += 1
+                self.attack_sequence.append(payload["threat_type"])
+                if len(self.attack_sequence) > 50:
+                    self.attack_sequence = self.attack_sequence[-50:]
+
+                logger.warning(
+                    f"🎯 AUTO-SIM #{self.attacks_generated}: {payload['threat_type']} "
+                    f"from {payload['attacker_mac']} on CH {payload['channel']}"
+                )
+
+                # Fast-path broadcast raw alert
+                await manager.broadcast_to_dashboards({
+                    "type": "raw_alert",
+                    "data": payload,
+                    "source": "auto_simulation",
+                    "received_at": datetime.now(timezone.utc).isoformat()
+                })
+                
+                await manager.broadcast_to_esp32({
+                    "type": "simulate_alert",
+                    "threat_type": payload["threat_type"],
+                    "mac": payload["attacker_mac"]
+                })
+
+                # Full AI pipeline analysis
+                asyncio.create_task(run_ai_pipeline(payload))
+
+                # Variable delay to make it feel realistic
+                jitter = random.uniform(-2.0, 2.0)
+                await asyncio.sleep(max(3.0, self.interval_seconds + jitter))
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Auto-simulation error: {e}")
+                await asyncio.sleep(5)
+
+        logger.info("🎯 Auto-Simulation Engine STOPPED")
+
+    def start(self, interval: float = 8.0):
+        """Start the auto-simulation background task."""
+        if self.is_running:
+            return False
+        self.is_running = True
+        self.interval_seconds = max(3.0, interval)
+        self.attacks_generated = 0
+        self.attack_sequence = []
+        self._task = asyncio.create_task(self._run_loop())
+        return True
+
+    def stop(self):
+        """Stop the auto-simulation background task."""
+        self.is_running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
+        return True
+
+    @property
+    def status(self) -> dict:
+        return {
+            "is_running": self.is_running,
+            "interval_seconds": self.interval_seconds,
+            "attacks_generated": self.attacks_generated,
+            "started_at": self.started_at,
+            "recent_attacks": self.attack_sequence[-10:] if self.attack_sequence else [],
+            "available_attack_types": list(ATTACK_ENCYCLOPEDIA.keys()),
+            "total_attack_types": len(ATTACK_ENCYCLOPEDIA)
+        }
+
+
+auto_sim = AutoSimulationEngine()
+
+
+# --- Simulation Endpoints ---
+
+@app.post("/api/simulation/auto/start")
+async def start_auto_simulation(interval: float = Query(8.0, description="Seconds between generated attacks")):
+    """Starts the background auto-simulation engine for continuous realistic attacks."""
+    started = auto_sim.start(interval)
+    if started:
+        logger.info(f"Auto-simulation started via API (interval={interval}s).")
+        return {"status": "started", "message": "Auto-simulation engine engaged.", "config": auto_sim.status}
+    else:
+        return {"status": "already_running", "message": "Simulation is already active.", "config": auto_sim.status}
+
+@app.post("/api/simulation/auto/stop")
+async def stop_auto_simulation():
+    """Stops the background auto-simulation engine."""
+    auto_sim.stop()
+    logger.info("Auto-simulation stopped via API.")
+    return {"status": "stopped", "message": "Auto-simulation engine halted.", "config": auto_sim.status}
+
+@app.get("/api/simulation/auto/status")
+async def auto_simulation_status():
+    """Returns the current state and metrics of the auto-simulation engine."""
+    return auto_sim.status
+
+@app.get("/api/attacks/encyclopedia")
+async def get_attack_encyclopedia():
+    """Returns the complete Sentinel Wi-Fi Attack Encyclopedia with forensic details."""
+    return ATTACK_ENCYCLOPEDIA
 
 
 # --- REST API Endpoints ---
@@ -772,6 +1308,11 @@ async def root():
         "serial_bridge": {
             "active": serial_bridge_state["is_running"],
             "port": serial_bridge_state["port"]
+        },
+        "wifi": {
+            "connected": wifi_state["connected"],
+            "ssid": wifi_state["ssid"],
+            "ip": wifi_state["ip"]
         }
     }
 
@@ -792,7 +1333,7 @@ async def health():
         except Exception:
             pass
 
-    active_engine_name = f"Local Ollama ({local_ai_engine.last_successful_model or local_ai_engine.active_model}) + LangGraph" if local_ai_engine.ollama_online else "Sentinel Local Forensic AI Engine"
+    active_engine_name = local_ai_engine.engine_display_name
 
     return {
         "status": "healthy",
@@ -811,7 +1352,7 @@ async def health():
 @app.get("/api/stats")
 async def get_stats():
     """Real-time statistical overview"""
-    active_engine_name = f"Local Ollama ({local_ai_engine.last_successful_model or local_ai_engine.active_model}) + LangGraph" if local_ai_engine.ollama_online else "Sentinel Local Forensic AI Engine"
+    active_engine_name = local_ai_engine.engine_display_name
     return {
         "status": "ONLINE",
         "threats_count": total_threats_detected,
@@ -864,6 +1405,20 @@ async def export_threats(format: str = "json"):
     return JSONResponse(content={"export_timestamp": datetime.now(timezone.utc).isoformat(), "threats": threat_history})
 
 
+async def simulate_telemetry_burst(packet_rate: int):
+    """Simulates a telemetry burst for the UI without any real RF transmission."""
+    import random
+    import asyncio
+    for i in range(50):
+        # Spike the network/cpu charts in the UI visually
+        await manager.broadcast_to_dashboards({
+            "type": "esp32_telemetry",
+            "data": {
+                "pkt_rate": packet_rate + random.randint(-100, 100)
+            }
+        })
+        await asyncio.sleep(0.1)
+
 @app.post("/api/threats/simulate")
 async def simulate_threat(sim: SimulationRequest):
     """Simulate a realistic 802.11 Wi-Fi threat from API or UI."""
@@ -888,8 +1443,15 @@ async def simulate_threat(sim: SimulationRequest):
         "received_at": datetime.now(timezone.utc).isoformat()
     })
 
+    await manager.broadcast_to_esp32({
+        "type": "simulate_alert",
+        "threat_type": payload["threat_type"],
+        "mac": payload["attacker_mac"]
+    })
+
     # 2. Async AI pipeline execution
     asyncio.create_task(run_ai_pipeline(payload))
+    asyncio.create_task(simulate_telemetry_burst(payload["packet_count"]))
 
     return {
         "success": True,
@@ -1151,6 +1713,443 @@ async def block_device(mac: str = Query(...)):
     return {"success": True, "message": f"Rogue MAC {mac} quarantined and blocked", "device": rogue}
 
 
+# --- WiFi Management API ---
+
+class WiFiManager:
+    """OS-level WiFi management for host PC scanning, connect, and network discovery."""
+
+    @staticmethod
+    def _is_windows() -> bool:
+        return platform.system().lower() == "windows"
+
+    @staticmethod
+    async def scan_networks() -> List[Dict[str, Any]]:
+        """Scan available WiFi networks using OS tools."""
+        networks = []
+        try:
+            if WiFiManager._is_windows():
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["netsh", "wlan", "show", "networks", "mode=Bssid"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0:
+                    networks = WiFiManager._parse_netsh_scan(result.stdout)
+            else:
+                # Linux: nmcli
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["nmcli", "-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "yes"],
+                    capture_output=True, text=True, timeout=15
+                )
+                if result.returncode == 0:
+                    networks = WiFiManager._parse_nmcli_scan(result.stdout)
+        except Exception as e:
+            logger.error(f"WiFi scan error: {e}")
+        return networks
+
+    @staticmethod
+    def _parse_netsh_scan(output: str) -> List[Dict[str, Any]]:
+        """Parse netsh wlan show networks output."""
+        networks = []
+        current = {}
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("SSID") and ":" in line and "BSSID" not in line:
+                if current.get("ssid"):
+                    networks.append(current)
+                ssid = line.split(":", 1)[1].strip()
+                current = {"ssid": ssid, "bssid": "", "channel": 0, "rssi": -100, "security": "UNKNOWN", "connected": False}
+            elif line.startswith("Network type"):
+                pass
+            elif line.startswith("Authentication"):
+                current["security"] = line.split(":", 1)[1].strip()
+            elif line.startswith("BSSID"):
+                current["bssid"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Signal"):
+                sig_str = line.split(":", 1)[1].strip().replace("%", "")
+                try:
+                    sig_pct = int(sig_str)
+                    # Convert percentage to approximate dBm
+                    current["rssi"] = int((sig_pct / 2) - 100)
+                except ValueError:
+                    pass
+            elif line.startswith("Channel"):
+                try:
+                    current["channel"] = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+        if current.get("ssid"):
+            networks.append(current)
+        return networks
+
+    @staticmethod
+    def _parse_nmcli_scan(output: str) -> List[Dict[str, Any]]:
+        """Parse nmcli device wifi list output."""
+        networks = []
+        for line in output.strip().splitlines():
+            parts = line.split(":")
+            if len(parts) >= 5:
+                ssid = parts[0].strip()
+                if not ssid:
+                    continue
+                try:
+                    signal = int(parts[3].strip())
+                    rssi = int((signal / 2) - 100)
+                except ValueError:
+                    rssi = -100
+                networks.append({
+                    "ssid": ssid,
+                    "bssid": parts[1].strip().replace("\\", ""),
+                    "channel": int(parts[2].strip()) if parts[2].strip().isdigit() else 0,
+                    "rssi": rssi,
+                    "security": parts[4].strip() if len(parts) > 4 else "UNKNOWN",
+                    "connected": False
+                })
+        return networks
+
+    @staticmethod
+    async def get_current_connection() -> Dict[str, Any]:
+        """Get current WiFi connection details."""
+        try:
+            if WiFiManager._is_windows():
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["netsh", "wlan", "show", "interfaces"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0:
+                    return WiFiManager._parse_netsh_interface(result.stdout)
+            else:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["nmcli", "-t", "-f", "NAME,DEVICE,TYPE,STATE", "connection", "show", "--active"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split(":")
+                        if len(parts) >= 4 and "wifi" in parts[2].lower():
+                            return {
+                                "connected": True,
+                                "ssid": parts[0],
+                                "interface": parts[1],
+                                "state": "connected"
+                            }
+        except Exception as e:
+            logger.error(f"WiFi status check error: {e}")
+        return {"connected": False, "ssid": "", "state": "disconnected"}
+
+    @staticmethod
+    def _parse_netsh_interface(output: str) -> Dict[str, Any]:
+        """Parse netsh wlan show interfaces output."""
+        info = {"connected": False, "ssid": "", "bssid": "", "channel": 0, "rssi": 0, "security": "", "state": "disconnected"}
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("State") and ":" in line:
+                state = line.split(":", 1)[1].strip().lower()
+                info["connected"] = state == "connected"
+                info["state"] = state
+            elif line.startswith("SSID") and "BSSID" not in line and ":" in line:
+                info["ssid"] = line.split(":", 1)[1].strip()
+            elif line.startswith("BSSID"):
+                info["bssid"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Channel"):
+                try:
+                    info["channel"] = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("Signal"):
+                try:
+                    sig_pct = int(line.split(":", 1)[1].strip().replace("%", ""))
+                    info["rssi"] = int((sig_pct / 2) - 100)
+                except ValueError:
+                    pass
+            elif line.startswith("Authentication"):
+                info["security"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Name"):
+                info["interface"] = line.split(":", 1)[1].strip()
+        return info
+
+    @staticmethod
+    async def connect(ssid: str, password: str = "") -> Dict[str, Any]:
+        """Connect to a WiFi network."""
+        try:
+            if WiFiManager._is_windows():
+                # Create a temporary profile XML for connection
+                # C4 fix: XML-escape user inputs to prevent XML injection
+                safe_ssid = xml.sax.saxutils.escape(ssid)
+                safe_password = xml.sax.saxutils.escape(password) if password else ""
+                if password:
+                    auth = "WPA2PSK"
+                    enc = "AES"
+                    key_xml = f"<sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>{safe_password}</keyMaterial></sharedKey>"
+                else:
+                    auth = "open"
+                    enc = "none"
+                    key_xml = ""
+
+                profile_xml = f"""<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{safe_ssid}</name>
+    <SSIDConfig><SSID><name>{safe_ssid}</name></SSID></SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>manual</connectionMode>
+    <MSM><security>
+        <authEncryption><authentication>{auth}</authentication><encryption>{enc}</encryption><useOneX>false</useOneX></authEncryption>
+        {key_xml}
+    </security></MSM>
+</WLANProfile>"""
+
+                # Write temp profile
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, prefix='sentinel_wifi_') as f:
+                    f.write(profile_xml)
+                    profile_path = f.name
+
+                # Add profile
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["netsh", "wlan", "add", "profile", f"filename={profile_path}"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+
+                # Connect
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["netsh", "wlan", "connect", f"name={ssid}"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+
+                # Clean up temp file
+                try:
+                    os.unlink(profile_path)
+                except Exception:
+                    pass
+
+                success = result.returncode == 0
+                return {
+                    "success": success,
+                    "message": result.stdout.strip() if success else result.stderr.strip() or "Connection failed",
+                    "ssid": ssid
+                }
+            else:
+                # Linux: nmcli
+                cmd = ["nmcli", "device", "wifi", "connect", ssid]
+                if password:
+                    cmd += ["password", password]
+                result = await asyncio.to_thread(
+                    subprocess.run, cmd,
+                    capture_output=True, text=True, timeout=30
+                )
+                success = result.returncode == 0
+                return {
+                    "success": success,
+                    "message": result.stdout.strip() if success else result.stderr.strip(),
+                    "ssid": ssid
+                }
+        except Exception as e:
+            return {"success": False, "message": str(e), "ssid": ssid}
+
+    @staticmethod
+    async def disconnect() -> Dict[str, Any]:
+        """Disconnect from current WiFi."""
+        try:
+            if WiFiManager._is_windows():
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["netsh", "wlan", "disconnect"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                return {"success": result.returncode == 0, "message": result.stdout.strip()}
+            else:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["nmcli", "device", "disconnect", "wlan0"],
+                    capture_output=True, text=True, timeout=10
+                )
+                return {"success": result.returncode == 0, "message": result.stdout.strip()}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    @staticmethod
+    async def scan_network_devices() -> List[Dict[str, Any]]:
+        """Discover devices on the connected network using ARP table."""
+        devices = []
+        try:
+            if WiFiManager._is_windows():
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["arp", "-a"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 3 and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                            mac = parts[1].replace("-", ":").upper()
+                            if mac != "FF:FF:FF:FF:FF:FF" and not parts[0].endswith(".255"):
+                                devices.append({
+                                    "ip": parts[0],
+                                    "mac": mac,
+                                    "type": parts[2] if len(parts) > 2 else "dynamic"
+                                })
+            else:
+                # Linux: ip neigh or arp
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["ip", "neigh", "show"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 5 and "lladdr" in parts:
+                            ip = parts[0]
+                            mac_idx = parts.index("lladdr") + 1
+                            if mac_idx < len(parts):
+                                devices.append({
+                                    "ip": ip,
+                                    "mac": parts[mac_idx].upper(),
+                                    "type": parts[-1] if parts[-1] in ["REACHABLE", "STALE", "DELAY"] else "dynamic"
+                                })
+        except Exception as e:
+            logger.error(f"Network device scan error: {e}")
+        return devices
+
+
+wifi_manager = WiFiManager()
+
+
+@app.get("/api/wifi/scan")
+async def scan_wifi_networks():
+    """Scan available WiFi networks from the host PC."""
+    networks = await wifi_manager.scan_networks()
+
+    # Mark which one is currently connected
+    current = await wifi_manager.get_current_connection()
+    if current.get("connected"):
+        for net in networks:
+            if net["ssid"] == current.get("ssid"):
+                net["connected"] = True
+
+    wifi_state["last_scan"] = networks
+    return {
+        "success": True,
+        "networks": networks,
+        "count": len(networks),
+        "current_connection": current
+    }
+
+
+@app.post("/api/wifi/connect")
+async def connect_wifi(req: WiFiConnectRequest):
+    """Connect the host PC to a WiFi network."""
+    logger.info(f"📶 WiFi connect request: {req.ssid}")
+    result = await wifi_manager.connect(req.ssid, req.password or "")
+
+    if result["success"]:
+        # Wait briefly for connection to establish
+        await asyncio.sleep(2)
+        status = await wifi_manager.get_current_connection()
+        wifi_state.update({
+            "connected": status.get("connected", False),
+            "ssid": status.get("ssid", req.ssid),
+            "bssid": status.get("bssid", ""),
+            "channel": status.get("channel", 0),
+            "rssi": status.get("rssi", 0),
+            "security": status.get("security", ""),
+            "last_error": None
+        })
+
+        # Broadcast WiFi state to dashboards
+        await manager.broadcast_to_dashboards({
+            "type": "wifi_connected",
+            "ssid": req.ssid,
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+    else:
+        wifi_state["last_error"] = result.get("message")
+
+    return result
+
+
+@app.post("/api/wifi/disconnect")
+async def disconnect_wifi():
+    """Disconnect from current WiFi network."""
+    prev_ssid = wifi_state.get("ssid", "")
+    result = await wifi_manager.disconnect()
+
+    wifi_state.update({
+        "connected": False,
+        "ssid": "",
+        "bssid": "",
+        "channel": 0,
+        "rssi": 0,
+        "ip": "",
+        "gateway": "",
+        "last_error": None
+    })
+
+    await manager.broadcast_to_dashboards({
+        "type": "wifi_disconnected",
+        "previous_ssid": prev_ssid,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
+    return result
+
+
+@app.get("/api/wifi/status")
+async def wifi_connection_status():
+    """Get current WiFi connection status."""
+    status = await wifi_manager.get_current_connection()
+    wifi_state.update({
+        "connected": status.get("connected", False),
+        "ssid": status.get("ssid", ""),
+        "bssid": status.get("bssid", ""),
+        "channel": status.get("channel", 0),
+        "rssi": status.get("rssi", 0),
+        "security": status.get("security", ""),
+        "interface": status.get("interface", "")
+    })
+    return {
+        "success": True,
+        **wifi_state,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/wifi/network-scan")
+async def scan_network_devices():
+    """Scan the connected network for devices using ARP table."""
+    status = await wifi_manager.get_current_connection()
+    if not status.get("connected"):
+        return {
+            "success": False,
+            "message": "Not connected to any WiFi network",
+            "devices": []
+        }
+
+    devices = await wifi_manager.scan_network_devices()
+    wifi_state["network_devices"] = devices
+
+    return {
+        "success": True,
+        "network_ssid": status.get("ssid", ""),
+        "devices": devices,
+        "count": len(devices),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
 # --- Serial Port Bridge API ---
 
 @app.get("/api/serial/ports")
@@ -1216,7 +2215,7 @@ async def disconnect_serial_port():
     }
 
 
-# --- ESP32 Web Server Proxy Controls (sentinal-v2.ino) ---
+# --- ESP32 Web Server Proxy Controls (sentinel_v3.ino) ---
 
 @app.get("/api/esp32/status")
 async def esp32_hardware_status():
@@ -1226,8 +2225,14 @@ async def esp32_hardware_status():
         "connected_serial": serial_bridge_state["is_running"],
         "serial_port": serial_bridge_state["port"],
         "active_clients": len(manager.esp32_clients),
-        "firmware_version": "Sentinel Pro v2.0 (Dual-Core ESP32-S3)",
+        "firmware_version": "Sentinel Guardian Firmware v3.0 (Dual-Core ESP32-S3)",
+        "hardware_peripherals": {
+            "oled_display": "SSD1306 128x64 (I2C SDA=21, SCL=22)",
+            "i2s_mic": "INMP441 (BCK=13, WS=14, DATA=12)",
+            "i2s_speaker": "MAX98357A (BCK=5, WS=6, DATA=7)"
+        },
         "voice_commands": {
+            "sustained_voice_trigger": "Alert AI Pipeline & Dashboard",
             "1_clap": "Scan Networks",
             "2_claps": "Stop All Attacks",
             "3_claps": "Display Hardware Stats"
@@ -1248,7 +2253,6 @@ async def websocket_dashboard(websocket: WebSocket, token: Optional[str] = Query
     if not connected:
         return
 
-    active_model = local_ai_engine.last_successful_model or local_ai_engine.active_model
     # Send initial welcome and recent threats
     try:
         await websocket.send_json({
@@ -1256,7 +2260,7 @@ async def websocket_dashboard(websocket: WebSocket, token: Optional[str] = Query
             "message": "Connected to Sentinel DevSecOps AI Guardian Backend v3.5",
             "server_time": datetime.now(timezone.utc).isoformat(),
             "recent_threats_count": len(threat_history),
-            "ai_engine": f"Local Ollama ({active_model}) + LangGraph" if local_ai_engine.ollama_online else "Sentinel Local Forensic AI Engine"
+            "ai_engine": local_ai_engine.engine_display_name
         })
     except Exception:
         pass
@@ -1293,9 +2297,8 @@ async def websocket_dashboard(websocket: WebSocket, token: Optional[str] = Query
         manager.disconnect_dashboard(websocket)
 
 
-@app.websocket("/ws/esp32")
-async def websocket_esp32(websocket: WebSocket, token: Optional[str] = Query(None)):
-    """WebSocket connection endpoint for physical ESP32-S3 sniffer hardware."""
+async def handle_esp32_websocket(websocket: WebSocket, token: Optional[str] = None):
+    """Unified WebSocket connection handler for ESP32 hardware (/ws/esp32 and /ws/sentinel)."""
     if not verify_ws_token(token):
         await websocket.close(code=4001, reason="Unauthorized")
         logger.warning("ESP32 rejected: invalid token")
@@ -1315,18 +2318,63 @@ async def websocket_esp32(websocket: WebSocket, token: Optional[str] = Query(Non
 
             try:
                 raw_payload = json.loads(data)
-                
-                # Check if voice command event
-                if raw_payload.get("type") == "voice_command":
-                    await manager.broadcast_to_dashboards({
-                        "type": "esp32_voice_event",
-                        "command": raw_payload.get("command"),
-                        "claps": raw_payload.get("claps"),
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    })
-                    continue
+            except Exception as e:
+                logger.error(f"Invalid JSON from ESP32: {e}")
+                await websocket.send_json({"error": f"Invalid JSON: {str(e)}"})
+                continue
 
-                validated = ThreatPayload(**raw_payload)
+            event = raw_payload.get("event") or raw_payload.get("type")
+
+            # 1. Hardware Online Notification (Sentinel v3.0)
+            if event == "sentinel_online":
+                logger.info(f"⚡ Sentinel Hardware Online: version={raw_payload.get('version', '3.0')}")
+                await manager.broadcast_to_dashboards({
+                    "type": "esp32_status",
+                    "status": "online",
+                    "version": raw_payload.get("version", "3.0"),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                continue
+
+            # 2. Hardware Telemetry Metrics (Sentinel v3.0)
+            if event == "telemetry":
+                logger.debug(f"📊 ESP32 Telemetry: {raw_payload}")
+                await manager.broadcast_to_dashboards({
+                    "type": "esp32_telemetry",
+                    "data": raw_payload,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                continue
+
+            # 3. Voice / Audio Trigger Command
+            if event == "voice_command" or "[MIC]" in str(raw_payload) or "[VOICE]" in str(raw_payload):
+                logger.info("🎤 ESP32 Voice trigger detected!")
+                await manager.broadcast_to_dashboards({
+                    "type": "esp32_voice_event",
+                    "command": raw_payload.get("command", "Voice Command Triggered"),
+                    "claps": raw_payload.get("claps", 1),
+                    "raw": raw_payload.get("raw", "Voice Trigger Detected"),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                continue
+
+            # 4. 802.11 Threat Alert (sentinel_v3.ino)
+            try:
+                ttype = raw_payload.get("threat_type") or raw_payload.get("type") or "ANOMALOUS_FRAME"
+                tmac = raw_payload.get("attacker_mac") or raw_payload.get("mac") or "DE:AD:BE:EF:00:01"
+                tcount = raw_payload.get("packet_count") or raw_payload.get("count") or raw_payload.get("pkt_rate") or 150
+                
+                normalized = {
+                    "sensor_id": raw_payload.get("sensor_id", "ESP32-S3-SNIFFER-v3"),
+                    "threat_type": ttype,
+                    "attacker_mac": tmac,
+                    "target_mac": raw_payload.get("target_mac", "FF:FF:FF:FF:FF:FF"),
+                    "channel": raw_payload.get("channel", 6),
+                    "rssi": raw_payload.get("rssi", -55),
+                    "packet_count": tcount,
+                    "timestamp": raw_payload.get("timestamp") or datetime.now(timezone.utc).isoformat()
+                }
+                validated = ThreatPayload(**normalized)
                 payload = validated.model_dump()
             except Exception as e:
                 logger.error(f"Invalid telemetry from ESP32: {e}")
@@ -1351,3 +2399,15 @@ async def websocket_esp32(websocket: WebSocket, token: Optional[str] = Query(Non
     except Exception as e:
         logger.error(f"ESP32 WebSocket error: {e}")
         manager.disconnect_esp32(websocket)
+
+
+@app.websocket("/ws/esp32")
+async def websocket_esp32(websocket: WebSocket, token: Optional[str] = Query(None)):
+    """WebSocket connection endpoint for physical ESP32-S3 sniffer hardware."""
+    await handle_esp32_websocket(websocket, token)
+
+
+@app.websocket("/ws/sentinel")
+async def websocket_sentinel(websocket: WebSocket, token: Optional[str] = Query(None)):
+    """WebSocket connection endpoint for Sentinel v3.0 firmware."""
+    await handle_esp32_websocket(websocket, token)

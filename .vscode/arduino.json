@@ -1,0 +1,6 @@
+{
+    "sketch": "sentinel_v3/sentinel_v3.ino",
+    "port": "COM7",
+    "board": "esp32:esp32:esp32s3",
+    "configuration": "CDCOnBoot=default,MSCDev=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=8M,PartitionScheme=default,DebugLevel=none,PSRAM=qspi,LoopCore=1,EventsCore=1,EraseFlash=none,ZigbeeMode=default"
+}

@@ -15,7 +15,7 @@
 #define EXPORT __attribute__((visibility("default")))
 #endif
 
-#pragma pack(push, 1)
+#pragma pack(1)
 
 typedef struct {
     uint16_t frame_control;
@@ -58,7 +58,7 @@ typedef struct {
     volatile uint32_t total_processed;
 } FrameRingBuffer;
 
-#pragma pack(pop)
+#pragma pack()
 
 static const char HEX_CHARS[] = "0123456789ABCDEF";
 

@@ -68,6 +68,28 @@
   --topbar-height: 64px;
 }
 
+/* Light Mode Overrides */
+.light-mode {
+  --bg-root: #f4f5f7;
+  --bg-sidebar: #ffffff;
+  --bg-main: #f0f2f5;
+  --bg-card: rgba(255, 255, 255, 0.85);
+  --bg-card-hover: rgba(250, 250, 250, 0.95);
+  --bg-input: rgba(0, 0, 0, 0.04);
+
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-default: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.15);
+
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.1);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.1);
+}
+
 /* ─── Reset & Base ──────────────────────────────────────────────── */
 *, *::before, *::after {
   box-sizing: border-box;
@@ -185,7 +207,7 @@ body {
 
 .nav-item:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-input);
 }
 
 .nav-item.active {
@@ -388,7 +410,7 @@ body {
 }
 
 .topbar-icon-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--border-subtle);
   color: var(--text-primary);
 }
 
@@ -654,7 +676,7 @@ body {
 
 .gauge-track {
   fill: none;
-  stroke: rgba(255, 255, 255, 0.06);
+  stroke: var(--border-subtle);
   stroke-width: 8;
 }
 
@@ -720,7 +742,7 @@ body {
 }
 
 .alert-item:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--bg-input);
 }
 
 .alert-dot {
@@ -778,7 +800,7 @@ body {
 }
 
 .server-item:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--bg-input);
 }
 
 .server-status-indicator {
@@ -924,12 +946,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--border-default);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--border-strong);
 }
 
 /* ─── Wi-Fi IDS / ESP32 Hardware Guardian Components ─────────────────── */
@@ -976,9 +998,43 @@ body {
 }
 
 .scenario-card:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-input);
   border-color: var(--border-strong);
   transform: translateY(-2px);
+}
+
+/* Custom Range Slider */
+.custom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+}
+.custom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--slider-color, var(--accent-cyan));
+  cursor: pointer;
+  transition: transform 0.1s;
+  box-shadow: 0 0 8px rgba(0,0,0,0.3);
+}
+.custom-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+.custom-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: var(--slider-color, var(--accent-cyan));
+  cursor: pointer;
+  transition: transform 0.1s;
 }
 
 .scenario-card.selected {
@@ -1027,7 +1083,7 @@ body {
 
 .fw-tab:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-input);
 }
 
 .fw-tab.active {
@@ -1139,7 +1195,7 @@ body {
 }
 
 .chat-bubble.user .chat-bubble-header {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--text-secondary);
 }
 
 .ai-chat-input-box {
@@ -1342,4 +1398,24 @@ body {
   font-size: 13px;
 }
 
+/* ─── Hollywood Scene Effects ────────────────────────────────────── */
+@keyframes crimsonFlashRoot {
+  0% { background-color: var(--bg-root); }
+  50% { background-color: rgba(220, 20, 60, 0.2); }
+  100% { background-color: var(--bg-root); }
+}
 
+.app-layout.flash-crimson {
+  animation: crimsonFlashRoot 0.4s ease-in-out infinite;
+}
+
+@keyframes oledAlertPulse {
+  0% { box-shadow: 0 0 5px rgba(255, 71, 87, 0.2); border-color: rgba(255, 71, 87, 0.3); }
+  50% { box-shadow: 0 0 25px rgba(255, 71, 87, 0.9); border-color: rgba(255, 71, 87, 1); }
+  100% { box-shadow: 0 0 5px rgba(255, 71, 87, 0.2); border-color: rgba(255, 71, 87, 0.3); }
+}
+
+.oled-box.alert {
+  animation: oledAlertPulse 0.3s infinite;
+  background: rgba(255, 71, 87, 0.1);
+}

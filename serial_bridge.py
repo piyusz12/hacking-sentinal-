@@ -63,10 +63,18 @@ async def bridge_loop(port: str, baud: int, ws_url: str):
                     if ser.in_waiting > 0:
                         line = ser.readline().decode("utf-8", errors="ignore").strip()
                         if line:
-                            # If line is JSON threat payload
-                            if line.startswith("{") and ("threat_type" in line or "type" in line):
-                                print(f"🚨 [ESP32 THREAT] Forwarding to AI Pipeline: {line}")
+                            # If line is direct JSON or [ALERT] / [TELEMETRY] from Sentinel v3 / v2
+                            if line.startswith("{") and ("threat_type" in line or "type" in line or "event" in line):
+                                print(f"🚨 [ESP32 JSON] Forwarding to AI Pipeline: {line}")
                                 await ws.send(line)
+                            elif "[ALERT] →" in line:
+                                json_part = line.split("[ALERT] →", 1)[1].strip()
+                                print(f"🚨 [ESP32 ALERT] Forwarding: {json_part}")
+                                await ws.send(json_part)
+                            elif "[TELEMETRY]" in line:
+                                json_part = line.split("[TELEMETRY]", 1)[1].strip()
+                                print(f"📊 [ESP32 TELEMETRY] Forwarding: {json_part}")
+                                await ws.send(json_part)
                             elif "[MIC]" in line or "[VOICE]" in line:
                                 print(f"🎤 [ESP32 VOICE] {line}")
                                 await ws.send(json.dumps({"type": "voice_command", "raw": line}))

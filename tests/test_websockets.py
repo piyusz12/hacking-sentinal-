@@ -97,7 +97,7 @@ def test_esp32_ws_invalid_payload(client):
         esp_ws.send_text("THIS IS NOT JSON")
         err = esp_ws.receive_json()
         assert "error" in err
-        assert "Validation failed" in err["error"]
+        assert "Invalid JSON" in err["error"] or "Validation failed" in err["error"]
 
 def test_esp32_ws_oversized_payload(client):
     with client.websocket_connect("/ws/esp32") as esp_ws:
@@ -106,6 +106,52 @@ def test_esp32_ws_oversized_payload(client):
         err = esp_ws.receive_json()
         assert "error" in err
         assert err["error"] == "Payload too large"
+
+def test_sentinel_v3_ws_online_and_telemetry(client):
+    with client.websocket_connect("/ws/dashboard") as dash_ws:
+        dash_ws.receive_json() # ack
+
+        with client.websocket_connect("/ws/sentinel") as sent_ws:
+            # 1. Send sentinel_online
+            sent_ws.send_text(json.dumps({"event": "sentinel_online", "version": "3.0"}))
+            status_msg = dash_ws.receive_json()
+            assert status_msg["type"] == "esp32_status"
+            assert status_msg["status"] == "online"
+            assert status_msg["version"] == "3.0"
+
+            # 2. Send telemetry
+            sent_ws.send_text(json.dumps({
+                "event": "telemetry",
+                "pkt_rate": 240,
+                "mgmt_frames": 180,
+                "data_frames": 60,
+                "channel": 6,
+                "wifi_rssi": -45,
+                "heap_free": 240000,
+                "timestamp": 123456
+            }))
+            telem_msg = dash_ws.receive_json()
+            assert telem_msg["type"] == "esp32_telemetry"
+            assert telem_msg["data"]["pkt_rate"] == 240
+
+def test_sentinel_v3_threat_detected_event(client):
+    with client.websocket_connect("/ws/dashboard") as dash_ws:
+        dash_ws.receive_json() # ack
+
+        with client.websocket_connect("/ws/sentinel") as sent_ws:
+            sent_ws.send_text(json.dumps({
+                "event": "threat_detected",
+                "type": "DEAUTH_FLOOD",
+                "mac": "11:22:33:44:55:66",
+                "rssi": -42,
+                "channel": 6,
+                "count": 15,
+                "timestamp": 123456
+            }))
+            alert_msg = dash_ws.receive_json()
+            assert alert_msg["type"] == "raw_alert"
+            assert alert_msg["data"]["threat_type"] == "DEAUTH_FLOOD"
+            assert alert_msg["data"]["attacker_mac"] == "11:22:33:44:55:66"
 
 def test_connection_manager_limits():
     test_mgr = ConnectionManager(max_dashboard=2, max_esp32=1)

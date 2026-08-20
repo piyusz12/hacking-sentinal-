@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "ESP32-S3",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/Users/piyush/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/cores/esp32/**",
+                "C:/Users/piyush/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/variants/esp32s3/**",
+                "C:/Users/piyush/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/**",
+                "C:/Users/piyush/Documents/Arduino/libraries/**",
+                "C:/Users/piyush/AppData/Local/Arduino15/libraries/**"
+            ],
+            "defines": [
+                "ESP32",
+                "ESP32S3",
+                "ARDUINO=10819",
+                "ARDUINO_ARCH_ESP32",
+                "ARDUINO_BOARD=\"ESP32S3_DEV\""
+            ],
+            "cStandard": "c11",
+            "cppStandard": "c++17"
+        }
+    ],
+    "version": 4
+}

@@ -3,7 +3,7 @@ title Sentinel DevSecOps AI Platform Launcher
 color 0A
 cls
 echo ================================================================
-echo  🛡️  SENTINEL DEVSECOPS & WI-FI IDS AI PLATFORM v3.5
+echo  🛡️  SENTINEL DEVSECOPS ^& WI-FI IDS AI PLATFORM v3.5
 echo ================================================================
 echo.
 echo [1/2] Starting Sentinel FastAPI Backend Server (Port 8000)...

@@ -96,9 +96,90 @@ const ATTACK_PRESETS = [
 ];
 
 const FIRMWARE = [
-  { title: "Core 0 — Promiscuous Sniffer Task", code: `// main.cpp  (ESP-IDF v5.1 — Dual-Core Architecture)\nvoid setup() {\n  // Pin high-speed RF sniffer exclusively to Core 0\n  xTaskCreatePinnedToCore(\n    snifferTask, "NetSniffer",\n    8192, NULL, 5,\n    &snifferHandle, 0   // ← CORE 0 (Zero frame drops)\n  );\n  \n  // OLED UI + Voice / Telemetry on Core 1\n  xTaskCreatePinnedToCore(\n    voiceDisplayTask, "VoiceUI",\n    4096, NULL, 3, NULL, 1  // ← CORE 1 (Smooth UI)\n  );\n}\n\nvoid snifferTask(void* pvParams) {\n  esp_wifi_set_promiscuous(true);\n  esp_wifi_set_promiscuous_rx_cb(&packetCallback);\n  vTaskDelete(NULL);  // Runs via hardware interrupt\n}` },
-  { title: "802.11 Frame Header Parser", code: `// sniffer.cpp — Real-time header classification\nvoid IRAM_ATTR packetCallback(\n  void* buf,\n  wifi_promiscuous_pkt_type_t type\n) {\n  auto* pkt = (wifi_promiscuous_pkt_t*)buf;\n  auto* hdr = (wifi_80211_hdr_t*)pkt->payload;\n\n  uint8_t ftype    = (hdr->frame_ctrl >> 2) & 0x03;\n  uint8_t fsubtype = (hdr->frame_ctrl >> 4) & 0x0F;\n\n  pktPerSecond++;\n  macTracker.record(hdr->addr2);\n\n  // Detect Management Deauth (subtype 0x0C)\n  if (ftype == 0x00 && fsubtype == 0x0C) {\n    if (++deauthCount > DEAUTH_THRESHOLD)\n      xQueueSend(alertQueue, hdr->addr2, 0);\n  }\n}` },
-  { title: "WebSocket JSON Dispatcher", code: `// dispatcher.cpp — Async transport to FastAPI backend\nvoid dispatchThreat(ThreatType t, uint8_t* mac) {\n  StaticJsonDocument<256> doc;\n  doc["type"]     = threatTypeStr(t);\n  doc["mac"]      = macToStr(mac);\n  doc["pkt_rate"] = pktPerSecond;\n  doc["channel"]  = currentChannel;\n  doc["rssi"]     = lastRSSI;\n  doc["ts"]       = esp_timer_get_time() / 1000;\n  \n  String payload;\n  serializeJson(doc, payload);\n\n  wsClient.sendTXT(payload);  // → FastAPI WebSocket\n\n  oled.clearDisplay();\n  oled.setTextSize(2);  oled.println("!! ALERT !!");\n  oled.setTextSize(1);  oled.println(threatTypeStr(t));\n  oled.display();\n  setLED(255, 0, 0);    // RGB LED → Red Strobe\n}` },
+  { 
+    title: "Core 0 — 802.11 Promiscuous Sniffer ISR", 
+    code: `// sentinel_v3.ino (Core 0 Sniffer — FreeRTOS Pinned Task)
+void snifferTask(void* pvParams) {
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&sniffer_cb);
+  esp_wifi_set_channel(HOME_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Feed Core 0 watchdog
+  }
+}
+
+void IRAM_ATTR sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t pkt_type) {
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  mac_hdr_t* hdr = (mac_hdr_t*)pkt->payload;
+  // Non-blocking ISR detection → alertQueue
+  if (((hdr->frame_ctrl >> 2) & 0x03) == 0x00 && ((hdr->frame_ctrl >> 4) & 0x0F) == 0x0C) {
+    if (++cnt_deauth >= DEAUTH_THRESHOLD) {
+      ThreatAlert a = { "DEAUTH_FLOOD", "", pkt->rx_ctrl.rssi, current_channel, cnt_deauth };
+      fmtMAC(hdr->addr2, a.mac);
+      xQueueSendFromISR(alertQueue, &a, NULL);
+    }
+  }
+}` 
+  },
+  { 
+    title: "Core 1 — I2S Audio Pipeline (INMP441 Mic + MAX98357A Amp)", 
+    code: `// sentinel_v3.ino (Dual I2S Ports NUM_0 / NUM_1)
+// INMP441 Mic on I2S_NUM_0 (RX only: BCK=13, WS=14, DATA=12)
+// MAX98357A Amp on I2S_NUM_1 (TX only: BCK=5, WS=6, DATA=7)
+
+void audioTask(void* pvParams) {
+  int32_t rawBuf[128];
+  size_t bytesRead;
+  while (true) {
+    if (i2s_read(I2S_NUM_0, rawBuf, sizeof(rawBuf), &bytesRead, pdMS_TO_TICKS(100)) == ESP_OK) {
+      int64_t sumSq = 0;
+      int n = bytesRead / sizeof(int32_t);
+      for (int i = 0; i < n; i++) {
+        int32_t s = rawBuf[i] >> 8;
+        sumSq += (int64_t)s * s;
+      }
+      int32_t rms = (n > 0) ? (int32_t)sqrtf((float)sumSq / n) : 0;
+      if (rms > VOICE_THRESHOLD) voice_trigger = true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}` 
+  },
+  { 
+    title: "Core 1 — SSD1306 OLED (128x64 I2C SDA=21, SCL=22)", 
+    code: `// sentinel_v3.ino (Hardware OLED States: BOOT / SAFE / ALERT / MONITORING)
+void updateOLED() {
+  if (!hw_oled_ok) return;
+  oled_blink = !oled_blink;
+  switch (sysState) {
+    case ST_SAFE:
+      oledSafe(approxRate, rssi);
+      break;
+    case ST_ALERT:
+      oledAlert(g_alert_type, g_alert_mac, oled_blink);
+      break;
+    case ST_MONITORING:
+      oledMonitoring(g_alert_type); // Shows "THREAT CONTAINED / CLAUDE AI RUNNING"
+      break;
+  }
+}` 
+  },
+  { 
+    title: "Bidirectional WebSocket & AI Telemetry Loop", 
+    code: `// sentinel_v3.ino (FastAPI /ws/sentinel WebSocket Client)
+void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_TEXT) {
+    StaticJsonDocument<512> doc;
+    if (deserializeJson(doc, payload, length) == DeserializationError::Ok) {
+      if (strcmp(doc["type"] | "", "ai_report") == 0) {
+        sysState = ST_MONITORING;
+        strlcpy(g_alert_type, doc["threat_type"] | g_alert_type, sizeof(g_alert_type));
+        if (hw_spk_ok) playAllClear(); // Play ♪ G->E->C Chime
+      }
+    }
+  }
+}` 
+  }
 ];
 
 const SERVERS = [
@@ -412,6 +493,19 @@ function App() {
   const [serialPorts, setSerialPorts] = useState([]);
   const [selectedPort, setSelectedPort] = useState('COM3');
   const [serialConnected, setSerialConnected] = useState(false);
+
+  // Settings states
+  const [darkMode, setDarkMode] = useState(true);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [sensitivity, setSensitivity] = useState(75);
+
+  useEffect(() => {
+    if (notificationsEnabled && 'Notification' in window) {
+      if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+        Notification.requestPermission();
+      }
+    }
+  }, [notificationsEnabled]);
   const [voiceEvent, setVoiceEvent] = useState(null);
 
   // Clear active incident
@@ -427,6 +521,9 @@ function App() {
       // Ignore network errors on clear
     }
   }, []);
+
+  const notificationsEnabledRef = useRef(notificationsEnabled);
+  useEffect(() => { notificationsEnabledRef.current = notificationsEnabled; }, [notificationsEnabled]);
 
   // Handle incoming WebSocket messages
   useEffect(() => {
@@ -446,6 +543,12 @@ function App() {
       setAttacker({ mac: lastMessage.data?.attacker_mac || 'UNKNOWN_ROGUE', x: 0.15, y: 0.45 });
       setAiLoading(true);
       setAiReport(null);
+      
+      if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('🚨 Sentinel Threat Detected', {
+          body: `Type: ${newAlert.threat_type || 'Anomaly'} | MAC: ${newAlert.attacker_mac || 'N/A'}`
+        });
+      }
     } else if (lastMessage.type === 'ai_report') {
       const newReport = {
         ...lastMessage,
@@ -454,10 +557,32 @@ function App() {
       setThreatFeed(prev => [newReport, ...prev].slice(0, 100));
       setAiLoading(false);
       setAiReport(lastMessage);
-      setWifiStatus("MITIGATING / LOGGED");
+      setWifiStatus("MONITORING");
+      
+      // Auto-resolve to SAFE after 6 seconds for the movie-scene effect
+      setTimeout(() => {
+        setWifiStatus(current => current === "MONITORING" ? "SAFE" : current);
+      }, 6000);
+      
+      if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('🛡️ AI Analyst Report', {
+          body: `Threat mitigation playbook generated for ${newReport.threat}.`
+        });
+      }
     } else if (lastMessage.type === 'esp32_voice_event') {
       setVoiceEvent(lastMessage.raw || `${lastMessage.claps} claps → ${lastMessage.command}`);
       setTimeout(() => setVoiceEvent(null), 4000);
+    } else if (lastMessage.type === 'esp32_telemetry') {
+      if (lastMessage.data) {
+        setLiveMetrics(prev => ({
+          ...prev,
+          network: Math.round((lastMessage.data.pkt_rate || prev.network) / 10) || prev.network,
+        }));
+      }
+    } else if (lastMessage.type === 'esp32_status') {
+      if (lastMessage.status === 'online') {
+        setSerialConnected(true);
+      }
     } else if (lastMessage.type === 'incident_reset') {
       clearActiveIncident();
     }
@@ -579,7 +704,7 @@ function App() {
   };
 
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${!darkMode ? 'light-mode' : ''} ${wifiStatus === 'ALERT' ? 'flash-crimson' : ''}`}>
       {/* ─── Sidebar ─────────────────────────────────────────── */}
       <aside className="sidebar">
         <div className="sidebar-header">
@@ -597,6 +722,7 @@ function App() {
           {[
             { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
             { id: 'threats', icon: ShieldAlert, label: 'Threats & Sandbox', badge: threatCount > 0 ? String(threatCount) : undefined },
+            { id: 'wifi', icon: Wifi, label: 'WiFi Connect' },
             { id: 'ai-agent', icon: Bot, label: 'AI SOC Analyst', badge: 'AI' },
             { id: 'topology', icon: Radio, label: 'Wi-Fi Topology' },
             { id: 'esp32-hub', icon: Usb, label: 'ESP32 Hardware' },
@@ -1469,16 +1595,230 @@ function App() {
           </div>
         )}
 
+        {/* ─── VIEW 9.5: WIFI CONNECT ──────────────────────────── */}
+        {activeNav === 'wifi' && (
+          <div className="dashboard" style={{ gap: 20 }}>
+            <div className="panel animate-in">
+              <div className="panel-header">
+                <div>
+                  <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Wifi size={18} style={{ color: 'var(--accent-blue)' }} />
+                    Host WiFi Network Management
+                  </div>
+                  <div className="panel-subtitle">Connect backend server to a target network for deep inspection</div>
+                </div>
+              </div>
+              
+              <div style={{ display: 'flex', gap: 24, marginTop: 16 }}>
+                {/* Connection Controls */}
+                <div style={{ flex: 1, background: 'var(--bg-main)', padding: 20, borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                  <h3 style={{ marginTop: 0, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Activity size={16} style={{ color: 'var(--accent-cyan)' }} />
+                    Live Status
+                  </h3>
+                  
+                  {liveMetrics?.wifi?.connected ? (
+                    <div style={{ padding: 16, background: 'rgba(6, 214, 160, 0.05)', border: '1px solid rgba(6, 214, 160, 0.2)', borderRadius: 8 }}>
+                      <div style={{ color: '#06d6a0', fontWeight: 600, fontSize: 16, marginBottom: 12 }}>
+                        ✅ Connected: {liveMetrics.wifi.ssid}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
+                        <div><strong>Local IP:</strong> {liveMetrics.wifi.ip || 'DHCP Pending'}</div>
+                        <div><strong>Interface:</strong> WLAN0</div>
+                      </div>
+                      
+                      <button 
+                        onClick={async () => {
+                          await fetch(`${BACKEND_URL}/api/wifi/disconnect`, { method: 'POST' });
+                          refreshBackendData();
+                        }}
+                        style={{ marginTop: 16, background: 'rgba(255, 68, 68, 0.1)', color: '#ff4444', border: '1px solid rgba(255, 68, 68, 0.3)', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, width: '100%' }}
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ padding: 16, background: 'rgba(255, 68, 68, 0.05)', border: '1px solid rgba(255, 68, 68, 0.2)', borderRadius: 8 }}>
+                      <div style={{ color: '#ff4444', fontWeight: 600, fontSize: 14 }}>❌ Not connected to any network</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginTop: 4 }}>Select a network below to connect.</div>
+                    </div>
+                  )}
+
+                  <h3 style={{ marginTop: 24, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Search size={16} style={{ color: 'var(--accent-purple)' }} />
+                    Discovered Devices
+                  </h3>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                    ARP scan of connected network
+                  </div>
+                  
+                  <div style={{ background: 'var(--bg-input)', borderRadius: 6, overflow: 'hidden' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead style={{ background: 'rgba(255,255,255,0.02)' }}>
+                        <tr>
+                          <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}>IP</th>
+                          <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}>MAC</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* Placeholder for devices */}
+                        <tr><td colSpan="2" style={{ padding: '12px', textAlign: 'center', color: 'var(--text-muted)' }}>Connect to a network to discover devices</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <button style={{ marginTop: 12, background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12, width: '100%' }}>
+                    Scan Network (ARP)
+                  </button>
+                </div>
+
+                {/* Network Scanner List */}
+                <div style={{ flex: 2, display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <h3 style={{ margin: 0, color: 'var(--text-primary)' }}>Available Networks</h3>
+                    <button 
+                      onClick={() => alert("Backend scan trigger")}
+                      style={{ background: 'var(--bg-input)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <RefreshCw size={12} /> Scan
+                    </button>
+                  </div>
+                  
+                  <div style={{ flex: 1, background: 'var(--bg-main)', border: '1px solid var(--border-subtle)', borderRadius: 8, overflowY: 'auto', maxHeight: 400 }}>
+                    {/* Dummy list until we wire up the real scan state */}
+                    <div style={{ padding: 12, borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>CorpNet_Secure</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>WPA3 Enterprise • Ch 11</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{ color: '#06d6a0', fontSize: 12, fontWeight: 600 }}>-42 dBm</div>
+                        <button style={{ background: 'var(--accent-purple-bg)', color: 'var(--accent-purple)', border: '1px solid rgba(123,97,255,0.3)', padding: '4px 12px', borderRadius: 4, fontSize: 12, cursor: 'pointer' }}>Connect</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ─── VIEW 10: SETTINGS / VECTOR DB ───────────────────── */}
         {['settings', 'databases'].includes(activeNav) && (
-          <div className="dashboard">
-            <div className="panel animate-in" style={{ padding: '40px', textAlign: 'center' }}>
-              <Database size={48} style={{ color: 'var(--accent-purple)', margin: '0 auto 16px', opacity: 0.8 }} />
-              <div className="panel-title" style={{ fontSize: 18, marginBottom: 8 }}>
-                FAISS Vector Database & Threat Signatures
+          <div className="dashboard" style={{ gap: '20px' }}>
+            <div className="panel animate-in" style={{ padding: '30px', background: 'var(--bg-card)' }}>
+              <div className="panel-title" style={{ fontSize: 24, marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
+                <Settings size={28} style={{ color: 'var(--accent-purple)' }} />
+                Platform Settings
               </div>
-              <div className="panel-subtitle" style={{ maxWidth: 540, margin: '0 auto', lineHeight: 1.6 }}>
-                The Sentinel FAISS Vector DB indexes 802.11 RFC frame definitions, Deauth attack heuristics, Evil Twin signatures, and DevSecOps playbooks. Live LangGraph pipelines query this vector store with sub-millisecond retrieval latency.
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                {/* System Configuration */}
+                <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '20px' }}>
+                  <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Server size={18} style={{ color: 'var(--accent-blue)' }} /> System Configuration
+                  </h3>
+                  
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>Backend API Endpoint</label>
+                    <input type="text" defaultValue={BACKEND_URL} style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }} />
+                  </div>
+                  
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>WebSocket Telemetry URL</label>
+                    <input type="text" defaultValue={WS_URL} style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }} />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
+                    <div>
+                      <div style={{ color: 'var(--text-primary)', fontSize: 14 }}>Real-time Notifications</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Enable desktop alerts for critical threats</div>
+                    </div>
+                    <div onClick={() => setNotificationsEnabled(!notificationsEnabled)} style={{ width: 40, height: 20, background: notificationsEnabled ? 'var(--accent-green)' : 'var(--bg-input)', borderRadius: 10, position: 'relative', cursor: 'pointer', transition: 'all 0.2s' }}>
+                      <div style={{ width: 16, height: 16, background: '#fff', borderRadius: '50%', position: 'absolute', top: 2, right: notificationsEnabled ? 2 : 22, transition: 'all 0.2s' }}></div>
+                    </div>
+                  </div>
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
+                    <div>
+                      <div style={{ color: 'var(--text-primary)', fontSize: 14 }}>Dark Mode</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Force application to dark theme</div>
+                    </div>
+                    <div onClick={() => setDarkMode(!darkMode)} style={{ width: 40, height: 20, background: darkMode ? 'var(--accent-purple)' : 'var(--bg-input)', borderRadius: 10, position: 'relative', cursor: 'pointer', transition: 'all 0.2s' }}>
+                      <div style={{ width: 16, height: 16, background: '#fff', borderRadius: '50%', position: 'absolute', top: 2, right: darkMode ? 2 : 22, transition: 'all 0.2s' }}></div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* AI & Vector DB */}
+                <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '20px' }}>
+                  <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Bot size={18} style={{ color: 'var(--accent-purple)' }} /> AI Agent & Vector DB
+                  </h3>
+                  
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>LLM Model</label>
+                    <select style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }}>
+                      <option>GPT-4o (Default)</option>
+                      <option>Claude 3.5 Sonnet</option>
+                      <option>Llama 3 (Local)</option>
+                    </select>
+                  </div>
+                  
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <label style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Threat Analysis Sensitivity</label>
+                      <span style={{ 
+                        background: `hsla(${120 - (sensitivity * 1.2)}, 100%, 50%, 0.15)`,
+                        color: `hsl(${120 - (sensitivity * 1.2)}, 100%, 65%)`,
+                        padding: '2px 8px', borderRadius: '10px', fontSize: 10, fontWeight: 'bold', 
+                        border: `1px solid hsla(${120 - (sensitivity * 1.2)}, 100%, 50%, 0.3)`
+                      }}>
+                        {sensitivity}% {sensitivity > 80 ? '(High)' : sensitivity > 40 ? '(Medium)' : '(Low)'}
+                      </span>
+                    </div>
+                    <input 
+                      type="range" 
+                      className="custom-slider"
+                      min="1" 
+                      max="100" 
+                      value={sensitivity}
+                      onChange={(e) => setSensitivity(parseInt(e.target.value))}
+                      style={{ 
+                        '--slider-color': `hsl(${120 - (sensitivity * 1.2)}, 100%, 50%)`,
+                        background: `linear-gradient(to right, hsl(${120 - (sensitivity * 1.2)}, 100%, 50%) ${sensitivity}%, var(--bg-input) ${sensitivity}%)`,
+                      }} 
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: 10, marginTop: 4 }}>
+                      <span>Fewer Alerts</span>
+                      <span>More Alerts</span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
+                    <div>
+                      <div style={{ color: 'var(--text-primary)', fontSize: 14 }}>FAISS Vector Store</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>3,421 threat signatures indexed</div>
+                    </div>
+                    <button style={{ background: 'var(--accent-cyan-bg)', color: 'var(--accent-cyan)', border: '1px solid rgba(76, 201, 240, 0.3)', padding: '6px 12px', borderRadius: '4px', fontSize: 12, cursor: 'pointer', transition: 'all 0.2s' }}>
+                      Re-index DB
+                    </button>
+                  </div>
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
+                    <div>
+                      <div style={{ color: 'var(--accent-red)', fontSize: 14 }}>Danger Zone</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Clear all stored telemetry & vectors</div>
+                    </div>
+                    <button style={{ background: 'var(--accent-red-bg)', color: 'var(--accent-red)', border: '1px solid rgba(255, 71, 87, 0.3)', padding: '6px 12px', borderRadius: '4px', fontSize: 12, cursor: 'pointer', transition: 'all 0.2s' }}>
+                      Clear Data
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
+              <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end', gap: '12px', borderTop: '1px solid var(--border-strong)', paddingTop: '20px' }}>
+                <button style={{ background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>Cancel</button>
+                <button style={{ background: 'linear-gradient(135deg, var(--accent-purple), var(--accent-cyan))', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s', boxShadow: 'var(--shadow-glow-purple)' }}>Save Changes</button>
               </div>
             </div>
           </div>
