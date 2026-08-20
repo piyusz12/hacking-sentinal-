@@ -112,6 +112,8 @@ struct ThreatAlert {
   int     count;
 };
 
+enum AudioCommand { CMD_AUDIO_ALERT, CMD_AUDIO_ALL_CLEAR, CMD_AUDIO_VOICE_ACK, CMD_AUDIO_WS_CONN, CMD_AUDIO_WS_DISC, CMD_AUDIO_RESET };
+QueueHandle_t audioQueue;
 QueueHandle_t alertQueue;
 portMUX_TYPE cntMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -512,29 +514,58 @@ void spkTone(int freqHz, int durationMs) {
   free(buf);
 }
 
-// Combined Buzzer + Speaker alarm for maximum impact
-void playAlertAlarm() {
-  Serial.println("[AUDIO] !! THREAT ALARM !!");
-  for (int i = 0; i < 3; i++) {
-    tone(BUZZER_PIN, 2500, 100);   // Buzzer: piercing high pitch
-    if (hw_spk_ok) spkTone(1800, 100); // Speaker: digital siren
-    noTone(BUZZER_PIN);
-    delay(40);
-    tone(BUZZER_PIN, 3000, 80);
-    if (hw_spk_ok) spkTone(2200, 80);
-    noTone(BUZZER_PIN);
-    delay(30);
+// Asynchronous Audio Task
+void audioAlarmTask(void* pvParams) {
+  AudioCommand cmd;
+  while (true) {
+    if (xQueueReceive(audioQueue, &cmd, portMAX_DELAY) == pdTRUE) {
+      switch (cmd) {
+        case CMD_AUDIO_ALERT:
+          Serial.println("[AUDIO] !! THREAT ALARM !!");
+          for (int i = 0; i < 3; i++) {
+            tone(BUZZER_PIN, 2500, 100);
+            if (hw_spk_ok) spkTone(1800, 100); else delay(100);
+            noTone(BUZZER_PIN);
+            delay(40);
+            tone(BUZZER_PIN, 3000, 80);
+            if (hw_spk_ok) spkTone(2200, 80); else delay(80);
+            noTone(BUZZER_PIN);
+            delay(30);
+          }
+          break;
+        case CMD_AUDIO_ALL_CLEAR:
+          Serial.println("[AUDIO] Threat contained — All Clear");
+          buzzerAllClear();
+          if (hw_spk_ok) {
+            spkTone(784, 90); spkTone(0, 30);
+            spkTone(659, 90); spkTone(0, 30);
+            spkTone(523, 160);
+          }
+          break;
+        case CMD_AUDIO_VOICE_ACK:
+          buzzerVoiceAck();
+          break;
+        case CMD_AUDIO_WS_CONN:
+          buzzerWsConnect();
+          break;
+        case CMD_AUDIO_WS_DISC:
+          buzzerWsDisconnect();
+          break;
+        case CMD_AUDIO_RESET:
+          buzzerTone(500, 100);
+          break;
+      }
+    }
   }
 }
 
+// Non-blocking queue publishers
+void playAlertAlarm() {
+  if (audioQueue) { AudioCommand cmd = CMD_AUDIO_ALERT; xQueueSend(audioQueue, &cmd, 0); }
+}
+
 void playAllClear() {
-  Serial.println("[AUDIO] Threat contained — All Clear");
-  buzzerAllClear();
-  if (hw_spk_ok) {
-    spkTone(784, 90); spkTone(0, 30);
-    spkTone(659, 90); spkTone(0, 30);
-    spkTone(523, 160);
-  }
+  if (audioQueue) { AudioCommand cmd = CMD_AUDIO_ALL_CLEAR; xQueueSend(audioQueue, &cmd, 0); }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -668,7 +699,7 @@ void enterAlertState(const char* type, const char* mac, int8_t rssi, uint8_t ch,
   Serial.printf("[ALERT] %s from %s CH:%d RSSI:%d PKT:%d\n", type, mac, ch, rssi, pkts);
 
   // Immediate visual + audio feedback
-  if (hw_oled_ok) oledAlert(type, mac, rssi, ch, pkts, true);
+  last_oled_update_ms = 0; // Force immediate async redraw
   playAlertAlarm();
 }
 
@@ -680,7 +711,7 @@ void enterMonitoringState(const char* type) {
   Serial.printf("[MONITORING] AI analyzing: %s\n", type);
 
   playAllClear();
-  if (hw_oled_ok) oledMonitoring(type);
+  last_oled_update_ms = 0; // Force immediate async redraw
 }
 
 void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -688,12 +719,12 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
     ws_connected = true;
     Serial.println("[WS] Connected to FastAPI backend");
     webSocket.sendTXT("{\"event\":\"sentinel_online\",\"version\":\"4.1\"}");
-    buzzerWsConnect();
+    if (audioQueue) { AudioCommand cmd = CMD_AUDIO_WS_CONN; xQueueSend(audioQueue, &cmd, 0); }
   }
   else if (type == WStype_DISCONNECTED) {
     ws_connected = false;
     Serial.println("[WS] Disconnected from backend");
-    buzzerWsDisconnect();
+    if (audioQueue) { AudioCommand cmd = CMD_AUDIO_WS_DISC; xQueueSend(audioQueue, &cmd, 0); }
   }
   else if (type == WStype_TEXT) {
     StaticJsonDocument<512> doc;
@@ -719,7 +750,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
     else if (strcmp(msgType, "incident_reset") == 0) {
       sysState = ST_SAFE;
       display.invertDisplay(false);
-      buzzerTone(500, 100);
+      if (audioQueue) { AudioCommand cmd = CMD_AUDIO_RESET; xQueueSend(audioQueue, &cmd, 0); }
       Serial.println("[SYSTEM] Incident cleared — returning to SAFE");
     }
   }
@@ -796,6 +827,7 @@ void setup() {
 
   // 4. Init Audio
   alertQueue = xQueueCreate(10, sizeof(ThreatAlert));
+  audioQueue = xQueueCreate(10, sizeof(AudioCommand));
   hw_spk_ok = initSpeaker();
   hw_mic_ok = initMic();
   if (hw_oled_ok) oledBoot(35, "Audio Subsystem OK");
@@ -835,6 +867,7 @@ void setup() {
   // 7. Start sniffer on Core 0
   xTaskCreatePinnedToCore(snifferTask, "Sniffer", 16384, NULL, 1, NULL, 0);
   if (hw_mic_ok) xTaskCreate(audioTask, "AudioTask", 8192, NULL, 2, NULL);
+  xTaskCreatePinnedToCore(audioAlarmTask, "AlarmTask", 4096, NULL, 3, NULL, 1);
 
   // 8. Boot complete
   if (hw_oled_ok) oledBoot(100, "SYSTEM ONLINE");
@@ -860,7 +893,7 @@ void loop() {
   if (voice_trigger) {
     voice_trigger = false;
     setRGB(255, 0, 255); // Purple flash
-    buzzerVoiceAck();
+    if (audioQueue) { AudioCommand cmd = CMD_AUDIO_VOICE_ACK; xQueueSend(audioQueue, &cmd, 0); }
     Serial.println("[VOICE] Command detected — notifying backend");
     if (ws_connected) {
       webSocket.sendTXT("{\"event\":\"voice_command\"}");
