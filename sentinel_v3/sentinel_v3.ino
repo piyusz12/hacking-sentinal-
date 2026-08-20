@@ -502,17 +502,20 @@ void audioAlarmTask(void* pvParams) {
             // Aggressive high-low siren (Police style)
             for (int i = 0; i < 4; i++) {
               tone(BUZZER_PIN, 2500, 100);
-              if (hw_spk_ok) spkTone(1800, 100); else delay(100);
+              if (hw_spk_ok) spkTone(1800, 100); 
+              delay(100);
               noTone(BUZZER_PIN); delay(20);
               tone(BUZZER_PIN, 1800, 100);
-              if (hw_spk_ok) spkTone(1200, 100); else delay(100);
+              if (hw_spk_ok) spkTone(1200, 100); 
+              delay(100);
               noTone(BUZZER_PIN); delay(20);
             }
           } else if (t.indexOf("EVIL") != -1 || t.indexOf("TWIN") != -1) {
             // Evil Twin: Rapid sharp bursts
             for (int i = 0; i < 6; i++) {
               tone(BUZZER_PIN, 3500, 40);
-              if (hw_spk_ok) spkTone(2500, 40); else delay(40);
+              if (hw_spk_ok) spkTone(2500, 40); 
+              delay(40);
               noTone(BUZZER_PIN); delay(60);
             }
           } else if (t.indexOf("BEACON") != -1) {
@@ -527,14 +530,16 @@ void audioAlarmTask(void* pvParams) {
             // Probe Recon: Sonar-like pings
             for (int i = 0; i < 3; i++) {
               tone(BUZZER_PIN, 3000, 50);
-              if (hw_spk_ok) spkTone(2800, 50); else delay(50);
+              if (hw_spk_ok) spkTone(2800, 50); 
+              delay(50);
               noTone(BUZZER_PIN); delay(200);
             }
           } else if (t.indexOf("KARMA") != -1) {
             // Karma: Low frequency buzzes
             for (int i = 0; i < 5; i++) {
               tone(BUZZER_PIN, 800, 80);
-              if (hw_spk_ok) spkTone(500, 80); else delay(80);
+              if (hw_spk_ok) spkTone(500, 80); 
+              delay(80);
               noTone(BUZZER_PIN); delay(40);
             }
           } else if (t.indexOf("PMKID") != -1) {
@@ -550,10 +555,12 @@ void audioAlarmTask(void* pvParams) {
             // Default: Standard rising siren
             for (int i = 0; i < 3; i++) {
               tone(BUZZER_PIN, 2500, 100);
-              if (hw_spk_ok) spkTone(1800, 100); else delay(100);
+              if (hw_spk_ok) spkTone(1800, 100); 
+              delay(100);
               noTone(BUZZER_PIN); delay(40);
               tone(BUZZER_PIN, 3000, 80);
-              if (hw_spk_ok) spkTone(2200, 80); else delay(80);
+              if (hw_spk_ok) spkTone(2200, 80); 
+              delay(80);
               noTone(BUZZER_PIN); delay(30);
             }
           }
@@ -712,6 +719,7 @@ void snifferTask(void* pvParams) {
 //   WEBSOCKET — FULL BIDIRECTIONAL HANDLER
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 void enterAlertState(const char* type, const char* mac, int8_t rssi, uint8_t ch, int pkts) {
+  bool stateChanged = (sysState != ST_ALERT);
   sysState = ST_ALERT;
   alert_start_ms = millis();
   strlcpy(g_alert_type, type, sizeof(g_alert_type));
@@ -723,7 +731,9 @@ void enterAlertState(const char* type, const char* mac, int8_t rssi, uint8_t ch,
   Serial.printf("[ALERT] %s from %s CH:%d RSSI:%d PKT:%d\n", type, mac, ch, rssi, pkts);
 
   // Immediate visual + audio feedback
-  last_oled_update_ms = 0; // Force immediate async redraw
+  if (stateChanged) {
+    last_oled_update_ms = 0; // Force immediate async redraw
+  }
   playAlertAlarm();
 }
 

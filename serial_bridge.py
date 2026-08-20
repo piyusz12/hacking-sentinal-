@@ -40,6 +40,40 @@ def find_esp32_port():
         return ports[0].device
     return "COM3"
 
+async def ws_to_serial(ws, ser):
+    try:
+        async for message in ws:
+            print(f"📩 [Backend -> ESP32] {message}")
+            ser.write((message.strip() + "\n").encode('utf-8'))
+    except Exception as e:
+        print(f"⚠️ ws_to_serial error: {e}")
+
+async def serial_to_ws(ws, ser):
+    try:
+        while True:
+            if ser.in_waiting > 0:
+                line = ser.readline().decode("utf-8", errors="ignore").strip()
+                if line:
+                    if line.startswith("{") and ("threat_type" in line or "type" in line or "event" in line):
+                        print(f"🚨 [ESP32 JSON] Forwarding to AI Pipeline: {line}")
+                        await ws.send(line)
+                    elif "[ALERT] →" in line:
+                        json_part = line.split("[ALERT] →", 1)[1].strip()
+                        print(f"🚨 [ESP32 ALERT] Forwarding: {json_part}")
+                        await ws.send(json_part)
+                    elif "[TELEMETRY]" in line:
+                        json_part = line.split("[TELEMETRY]", 1)[1].strip()
+                        print(f"📊 [ESP32 TELEMETRY] Forwarding: {json_part}")
+                        await ws.send(json_part)
+                    elif "[MIC]" in line or "[VOICE]" in line:
+                        print(f"🎤 [ESP32 VOICE] {line}")
+                        await ws.send(json.dumps({"type": "voice_command", "raw": line}))
+                    else:
+                        print(f"📡 [ESP32 LOG] {line}")
+            await asyncio.sleep(0.005)
+    except Exception as e:
+        print(f"⚠️ serial_to_ws error: {e}")
+
 async def bridge_loop(port: str, baud: int, ws_url: str):
     print("=" * 60)
     print(" 🛡️ Sentinel ESP32 Hardware Serial-to-WebSocket Bridge")
@@ -58,29 +92,18 @@ async def bridge_loop(port: str, baud: int, ws_url: str):
             print(f"✅ Serial connected to {port}. Connecting to Sentinel WebSocket...")
 
             async with websockets.connect(ws_url) as ws:
-                print("✅ Connected to Sentinel FastAPI Backend! Listening for ESP32 frames & claps...\n")
-                while True:
-                    if ser.in_waiting > 0:
-                        line = ser.readline().decode("utf-8", errors="ignore").strip()
-                        if line:
-                            # If line is direct JSON or [ALERT] / [TELEMETRY] from Sentinel v3 / v2
-                            if line.startswith("{") and ("threat_type" in line or "type" in line or "event" in line):
-                                print(f"🚨 [ESP32 JSON] Forwarding to AI Pipeline: {line}")
-                                await ws.send(line)
-                            elif "[ALERT] →" in line:
-                                json_part = line.split("[ALERT] →", 1)[1].strip()
-                                print(f"🚨 [ESP32 ALERT] Forwarding: {json_part}")
-                                await ws.send(json_part)
-                            elif "[TELEMETRY]" in line:
-                                json_part = line.split("[TELEMETRY]", 1)[1].strip()
-                                print(f"📊 [ESP32 TELEMETRY] Forwarding: {json_part}")
-                                await ws.send(json_part)
-                            elif "[MIC]" in line or "[VOICE]" in line:
-                                print(f"🎤 [ESP32 VOICE] {line}")
-                                await ws.send(json.dumps({"type": "voice_command", "raw": line}))
-                            else:
-                                print(f"📡 [ESP32 LOG] {line}")
-                    await asyncio.sleep(0.005)
+                print("✅ Connected to Sentinel FastAPI Backend! Bidirectional communication active...\n")
+                
+                t1 = asyncio.create_task(serial_to_ws(ws, ser))
+                t2 = asyncio.create_task(ws_to_serial(ws, ser))
+                
+                done, pending = await asyncio.wait(
+                    [t1, t2],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                for task in pending:
+                    task.cancel()
 
         except serial.SerialException as se:
             print(f"⚠️ Serial Port Error ({port}): {se}. Retrying in 3 seconds...")

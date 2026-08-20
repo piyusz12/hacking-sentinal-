@@ -19,11 +19,11 @@ const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 const WS_TOKEN = import.meta.env.VITE_WS_TOKEN || 'sentinel-dev-token-change-me';
 
 const DEFAULT_DEVICES = [
-  { id: 1, mac: "A4:C3:F0:12:34:56", ip: "10.0.1.101", name: "MacBook Pro M3",   vendor: "Apple Inc.",    trusted: true,  sig: -48, rx: 0.72, ry: 0.27 },
-  { id: 2, mac: "D8:BB:C1:98:76:54", ip: "10.0.1.102", name: "Samsung 8K QLED",  vendor: "Samsung Elec.", trusted: true,  sig: -61, rx: 0.22, ry: 0.72 },
-  { id: 3, mac: "FC:EC:DA:55:44:33", ip: "10.0.1.103", name: "iPhone 15 Pro Max",vendor: "Apple Inc.",    trusted: true,  sig: -44, rx: 0.80, ry: 0.70 },
-  { id: 4, mac: "B0:A7:B9:11:22:33", ip: "10.0.1.1",   name: "Sentinel Core AP", vendor: "Cisco Meraki",  trusted: true,  sig: -18, rx: 0.50, ry: 0.50 },
-  { id: 5, mac: "C4:E9:84:77:AA:BB", ip: "10.0.1.110", name: "Raspberry Pi 5",   vendor: "Raspberry Pi",  trusted: true,  sig: -53, rx: 0.22, ry: 0.28 },
+  { id: 1, mac: "A4:C3:F0:12:34:56", ip: "10.0.1.101", name: "MacBook Pro M3", vendor: "Apple Inc.", trusted: true, sig: -48, rx: 0.72, ry: 0.27 },
+  { id: 2, mac: "D8:BB:C1:98:76:54", ip: "10.0.1.102", name: "Samsung 8K QLED", vendor: "Samsung Elec.", trusted: true, sig: -61, rx: 0.22, ry: 0.72 },
+  { id: 3, mac: "FC:EC:DA:55:44:33", ip: "10.0.1.103", name: "iPhone 15 Pro Max", vendor: "Apple Inc.", trusted: true, sig: -44, rx: 0.80, ry: 0.70 },
+  { id: 4, mac: "B0:A7:B9:11:22:33", ip: "10.0.1.1", name: "Sentinel Core AP", vendor: "Cisco Meraki", trusted: true, sig: -18, rx: 0.50, ry: 0.50 },
+  { id: 5, mac: "C4:E9:84:77:AA:BB", ip: "10.0.1.110", name: "Raspberry Pi 5", vendor: "Raspberry Pi", trusted: true, sig: -53, rx: 0.22, ry: 0.28 },
 ];
 
 const ATTACK_PRESETS = [
@@ -96,8 +96,8 @@ const ATTACK_PRESETS = [
 ];
 
 const FIRMWARE = [
-  { 
-    title: "Core 0 — 802.11 Promiscuous Sniffer ISR", 
+  {
+    title: "Core 0 — 802.11 Promiscuous Sniffer ISR",
     code: `// sentinel_v3.ino (Core 0 Sniffer — FreeRTOS Pinned Task)
 void snifferTask(void* pvParams) {
   esp_wifi_set_promiscuous(true);
@@ -119,10 +119,10 @@ void IRAM_ATTR sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t pkt_type) {
       xQueueSendFromISR(alertQueue, &a, NULL);
     }
   }
-}` 
+}`
   },
-  { 
-    title: "Core 1 — I2S Audio Pipeline (INMP441 Mic + MAX98357A Amp)", 
+  {
+    title: "Core 1 — I2S Audio Pipeline (INMP441 Mic + MAX98357A Amp)",
     code: `// sentinel_v3.ino (Dual I2S Ports NUM_0 / NUM_1)
 // INMP441 Mic on I2S_NUM_0 (RX only: BCK=13, WS=14, DATA=12)
 // MAX98357A Amp on I2S_NUM_1 (TX only: BCK=5, WS=6, DATA=7)
@@ -143,10 +143,10 @@ void audioTask(void* pvParams) {
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
-}` 
+}`
   },
-  { 
-    title: "Core 1 — SSD1306 OLED (128x64 I2C SDA=21, SCL=22)", 
+  {
+    title: "Core 1 — SSD1306 OLED (128x64 I2C SDA=21, SCL=22)",
     code: `// sentinel_v3.ino (Hardware OLED States: BOOT / SAFE / ALERT / MONITORING)
 void updateOLED() {
   if (!hw_oled_ok) return;
@@ -162,10 +162,10 @@ void updateOLED() {
       oledMonitoring(g_alert_type); // Shows "THREAT CONTAINED / CLAUDE AI RUNNING"
       break;
   }
-}` 
+}`
   },
-  { 
-    title: "Bidirectional WebSocket & AI Telemetry Loop", 
+  {
+    title: "Bidirectional WebSocket & AI Telemetry Loop",
     code: `// sentinel_v3.ino (FastAPI /ws/sentinel WebSocket Client)
 void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   if (type == WStype_TEXT) {
@@ -178,7 +178,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
       }
     }
   }
-}` 
+}`
   }
 ];
 
@@ -332,52 +332,52 @@ const TopoMap = React.memo(function TopoMap({ devices, attacker, status }) {
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
       <defs>
-        <marker id="mG" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3z" fill={green} opacity="0.6"/></marker>
-        <marker id="mR" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3z" fill="#ff4757" opacity="0.95"/></marker>
+        <marker id="mG" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3z" fill={green} opacity="0.6" /></marker>
+        <marker id="mR" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3z" fill="#ff4757" opacity="0.95" /></marker>
       </defs>
-      
-      <circle cx={router.rx * W} cy={router.ry * H} r="110" fill="none" stroke="rgba(6, 214, 160, 0.08)" strokeWidth="1" strokeDasharray="4 4"/>
-      <circle cx={router.rx * W} cy={router.ry * H} r="65" fill="none" stroke="rgba(6, 214, 160, 0.12)" strokeWidth="1"/>
+
+      <circle cx={router.rx * W} cy={router.ry * H} r="110" fill="none" stroke="rgba(6, 214, 160, 0.08)" strokeWidth="1" strokeDasharray="4 4" />
+      <circle cx={router.rx * W} cy={router.ry * H} r="65" fill="none" stroke="rgba(6, 214, 160, 0.12)" strokeWidth="1" />
 
       {clients.map(d => (
         <line key={d.id} x1={d.rx * W} y1={d.ry * H} x2={router.rx * W} y2={router.ry * H}
           stroke={d.trusted && status === "SAFE" ? green : "#ff4757"} strokeWidth="1.2" opacity="0.5"
-          strokeDasharray={status !== "SAFE" ? "5,4" : "none"} markerEnd="url(#mG)"/>
+          strokeDasharray={status !== "SAFE" ? "5,4" : "none"} markerEnd="url(#mG)" />
       ))}
-      
-      <rect x={W * 0.35} y={4} width={W * 0.3} height={20} rx={5} fill="rgba(15, 23, 42, 0.85)" stroke="#334155" strokeWidth="1"/>
+
+      <rect x={W * 0.35} y={4} width={W * 0.3} height={20} rx={5} fill="rgba(15, 23, 42, 0.85)" stroke="#334155" strokeWidth="1" />
       <text x={W * 0.5} y={17} textAnchor="middle" fontSize="9" fill="#8b92a5" fontFamily="var(--font-mono)" fontWeight="600">INTERNET GATEWAY</text>
-      <line x1={W * 0.5} y1={24} x2={router.rx * W} y2={router.ry * H - 22} stroke="#334155" strokeWidth="1" strokeDasharray="3,3"/>
-      
+      <line x1={W * 0.5} y1={24} x2={router.rx * W} y2={router.ry * H - 22} stroke="#334155" strokeWidth="1" strokeDasharray="3,3" />
+
       {status === "SAFE" && <circle cx={router.rx * W} cy={router.ry * H} r="26" fill="none" stroke={green} strokeWidth="1" opacity="0.4">
-        <animate attributeName="r" values="22;42;22" dur="3s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" values="0.4;0;0.4" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="22;42;22" dur="3s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.4;0;0.4" dur="3s" repeatCount="indefinite" />
       </circle>}
-      
+
       {attacker && <g>
         <line x1={attacker.x * W} y1={attacker.y * H} x2={router.rx * W} y2={router.ry * H} stroke="#ff4757" strokeWidth="2.4" strokeDasharray="6,3" opacity="0.95" markerEnd="url(#mR)">
-          <animate attributeName="stroke-dashoffset" from="0" to="-24" dur="0.3s" repeatCount="indefinite"/>
+          <animate attributeName="stroke-dashoffset" from="0" to="-24" dur="0.3s" repeatCount="indefinite" />
         </line>
         <circle cx={attacker.x * W} cy={attacker.y * H} r="20" fill="none" stroke="#ff4757" strokeWidth="1.5" opacity="0.8">
-          <animate attributeName="r" values="14;36;14" dur="1s" repeatCount="indefinite"/>
-          <animate attributeName="opacity" values="0.8;0;0.8" dur="1s" repeatCount="indefinite"/>
+          <animate attributeName="r" values="14;36;14" dur="1s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.8;0;0.8" dur="1s" repeatCount="indefinite" />
         </circle>
       </g>}
-      
+
       {devices.map(d => {
         const isR = d.id === 4;
         return (
           <g key={d.id} style={{ cursor: "pointer" }}>
-            <circle cx={d.rx * W} cy={d.ry * H} r={isR ? 22 : 14} fill={isR ? "rgba(6, 214, 160, 0.15)" : d.trusted ? "rgba(15, 23, 42, 0.9)" : "rgba(255, 71, 87, 0.2)"} stroke={isR ? green : d.trusted ? "#475569" : "#ff4757"} strokeWidth={isR ? 2 : 1.2}/>
+            <circle cx={d.rx * W} cy={d.ry * H} r={isR ? 22 : 14} fill={isR ? "rgba(6, 214, 160, 0.15)" : d.trusted ? "rgba(15, 23, 42, 0.9)" : "rgba(255, 71, 87, 0.2)"} stroke={isR ? green : d.trusted ? "#475569" : "#ff4757"} strokeWidth={isR ? 2 : 1.2} />
             <text x={d.rx * W} y={d.ry * H + 4} textAnchor="middle" fontSize="10.5" fill={isR ? green : d.trusted ? "#e8eaf0" : "#ff4757"} fontFamily="var(--font-mono)" fontWeight={isR ? "700" : "500"}>{isR ? "AP" : d.name.slice(0, 3).toUpperCase()}</text>
             <text x={d.rx * W} y={d.ry * H + (isR ? 36 : 28)} textAnchor="middle" fontSize="8.5" fill="#8b92a5" fontFamily="var(--font-mono)" fontWeight="500">{d.name}</text>
             <text x={d.rx * W} y={d.ry * H + (isR ? 46 : 38)} textAnchor="middle" fontSize="7.5" fill="#5c6575" fontFamily="var(--font-mono)">{d.ip}</text>
           </g>
         );
       })}
-      
+
       {attacker && <g>
-        <circle cx={attacker.x * W} cy={attacker.y * H} r={16} fill="rgba(255, 71, 87, 0.25)" stroke="#ff4757" strokeWidth="2" strokeDasharray="3,2"/>
+        <circle cx={attacker.x * W} cy={attacker.y * H} r={16} fill="rgba(255, 71, 87, 0.25)" stroke="#ff4757" strokeWidth="2" strokeDasharray="3,2" />
         <text x={attacker.x * W} y={attacker.y * H + 4} textAnchor="middle" fontSize="10.5" fill="#ff4757" fontFamily="var(--font-mono)" fontWeight="700">ATK</text>
         <text x={attacker.x * W} y={attacker.y * H + 26} textAnchor="middle" fontSize="8.5" fill="#ff4757" fontFamily="var(--font-mono)" fontWeight="600">ROGUE NODE</text>
         <text x={attacker.x * W} y={attacker.y * H + 36} textAnchor="middle" fontSize="7.5" fill="#ff4757" fontFamily="var(--font-mono)">{attacker.mac?.slice(0, 8)}</text>
@@ -571,7 +571,7 @@ function App() {
       setAttacker({ mac: lastMessage.data?.attacker_mac || 'UNKNOWN_ROGUE', x: 0.15, y: 0.45 });
       setAiLoading(true);
       setAiReport(null);
-      
+
       if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
         new Notification('🚨 Sentinel Threat Detected', {
           body: `Type: ${newAlert.threat_type || 'Anomaly'} | MAC: ${newAlert.attacker_mac || 'N/A'}`
@@ -586,12 +586,12 @@ function App() {
       setAiLoading(false);
       setAiReport(lastMessage);
       setWifiStatus("MONITORING");
-      
+
       // Auto-resolve to SAFE after 6 seconds for the movie-scene effect
       setTimeout(() => {
         setWifiStatus(current => current === "MONITORING" ? "SAFE" : current);
       }, 6000);
-      
+
       if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
         // Strip markdown and extract a concise mitigation summary from the AI report
         const rawMitigation = newReport.mitigation || `Threat mitigation playbook generated for ${newReport.threat}.`;
@@ -856,7 +856,7 @@ function App() {
               <Activity size={12} />
               {isConnected ? 'Live WebSocket' : 'Connecting...'}
             </div>
-            
+
             <button className="topbar-icon-btn" id="btn-refresh" title="Refresh Telemetry" onClick={refreshBackendData}>
               <RefreshCw size={16} />
             </button>
@@ -1206,7 +1206,7 @@ function App() {
                   {!aiLoading && !aiReport && (
                     <div style={{ color: '#5c6575', fontSize: 13, padding: '50px 20px', textAlign: 'center' }}>
                       <span style={{ color: '#06d6a0', fontWeight: 'bold', fontSize: 24, display: 'block', marginBottom: 12 }}>📡</span>
-                      <strong>Ready for Threat Ingestion</strong><br/>
+                      <strong>Ready for Threat Ingestion</strong><br />
                       <span style={{ fontSize: 12, marginTop: 6, display: 'inline-block' }}>
                         Click any attack preset on the left or send real frames from your ESP32 hardware to trigger real-time AI security analysis.
                       </span>
@@ -1481,8 +1481,8 @@ function App() {
                     <Volume2 size={16} /> INMP441 Mic Voice Command Map
                   </div>
                   <div style={{ fontSize: 12, color: '#8b92a5', lineHeight: 1.6 }}>
-                    • <strong>1 Clap:</strong> Trigger Wi-Fi AP Scan<br/>
-                    • <strong>2 Claps:</strong> Stop All Active RF Attacks<br/>
+                    • <strong>1 Clap:</strong> Trigger Wi-Fi AP Scan<br />
+                    • <strong>2 Claps:</strong> Stop All Active RF Attacks<br />
                     • <strong>3 Claps:</strong> Display Hardware Stats on OLED
                   </div>
                 </div>
@@ -1492,7 +1492,7 @@ function App() {
                     <Cpu size={16} /> Dual-Core FreeRTOS Architecture
                   </div>
                   <div style={{ fontSize: 12, color: '#8b92a5', lineHeight: 1.6 }}>
-                    • <strong>Core 0:</strong> Promiscuous 802.11 Sniffer (Interrupt-driven, zero dropped frames)<br/>
+                    • <strong>Core 0:</strong> Promiscuous 802.11 Sniffer (Interrupt-driven, zero dropped frames)<br />
                     • <strong>Core 1:</strong> SSD1306 OLED Display + INMP441 Microphone Audio Task
                   </div>
                 </div>
@@ -1656,7 +1656,7 @@ function App() {
                   <div className="panel-subtitle">Connect backend server to a target network for deep inspection</div>
                 </div>
               </div>
-              
+
               <div style={{ display: 'flex', gap: 24, marginTop: 16 }}>
                 {/* Connection Controls */}
                 <div style={{ flex: 1, background: 'var(--bg-main)', padding: 20, borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
@@ -1664,7 +1664,7 @@ function App() {
                     <Activity size={16} style={{ color: 'var(--accent-cyan)' }} />
                     Live Status
                   </h3>
-                  
+
                   {liveMetrics?.wifi?.connected ? (
                     <div style={{ padding: 16, background: 'rgba(6, 214, 160, 0.05)', border: '1px solid rgba(6, 214, 160, 0.2)', borderRadius: 8 }}>
                       <div style={{ color: '#06d6a0', fontWeight: 600, fontSize: 16, marginBottom: 12 }}>
@@ -1674,8 +1674,8 @@ function App() {
                         <div><strong>Local IP:</strong> {liveMetrics.wifi.ip || 'DHCP Pending'}</div>
                         <div><strong>Interface:</strong> WLAN0</div>
                       </div>
-                      
-                      <button 
+
+                      <button
                         onClick={async () => {
                           await fetch(`${BACKEND_URL}/api/wifi/disconnect`, { method: 'POST' });
                           refreshBackendData();
@@ -1699,7 +1699,7 @@ function App() {
                   <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
                     ARP scan of connected network
                   </div>
-                  
+
                   <div style={{ background: 'var(--bg-input)', borderRadius: 6, overflow: 'hidden' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                       <thead style={{ background: 'rgba(255,255,255,0.02)' }}>
@@ -1723,14 +1723,14 @@ function App() {
                 <div style={{ flex: 2, display: 'flex', flexDirection: 'column' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                     <h3 style={{ margin: 0, color: 'var(--text-primary)' }}>Available Networks</h3>
-                    <button 
+                    <button
                       onClick={() => alert("Backend scan trigger")}
                       style={{ background: 'var(--bg-input)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
                     >
                       <RefreshCw size={12} /> Scan
                     </button>
                   </div>
-                  
+
                   <div style={{ flex: 1, background: 'var(--bg-main)', border: '1px solid var(--border-subtle)', borderRadius: 8, overflowY: 'auto', maxHeight: 400 }}>
                     {/* Dummy list until we wire up the real scan state */}
                     <div style={{ padding: 12, borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1758,19 +1758,19 @@ function App() {
                 <Settings size={28} style={{ color: 'var(--accent-purple)' }} />
                 Platform Settings
               </div>
-              
+
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 {/* System Configuration */}
                 <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: '20px' }}>
                   <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Server size={18} style={{ color: 'var(--accent-blue)' }} /> System Configuration
                   </h3>
-                  
+
                   <div style={{ marginBottom: 16 }}>
                     <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>Backend API Endpoint</label>
                     <input type="text" defaultValue={BACKEND_URL} style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }} />
                   </div>
-                  
+
                   <div style={{ marginBottom: 16 }}>
                     <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>WebSocket Telemetry URL</label>
                     <input type="text" defaultValue={WS_URL} style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }} />
@@ -1785,7 +1785,7 @@ function App() {
                       <div style={{ width: 16, height: 16, background: '#fff', borderRadius: '50%', position: 'absolute', top: 2, right: notificationsEnabled ? 2 : 22, transition: 'all 0.2s' }}></div>
                     </div>
                   </div>
-                  
+
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
                     <div>
                       <div style={{ color: 'var(--text-primary)', fontSize: 14 }}>Dark Mode</div>
@@ -1802,7 +1802,7 @@ function App() {
                   <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Bot size={18} style={{ color: 'var(--accent-purple)' }} /> AI Agent & Vector DB
                   </h3>
-                  
+
                   <div style={{ marginBottom: 16 }}>
                     <label style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 12, marginBottom: 6 }}>LLM Model</label>
                     <select style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-primary)', padding: '10px', borderRadius: 'var(--radius-sm)' }}>
@@ -1811,30 +1811,30 @@ function App() {
                       <option>Llama 3 (Local)</option>
                     </select>
                   </div>
-                  
+
                   <div style={{ marginBottom: 16 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                       <label style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Threat Analysis Sensitivity</label>
-                      <span style={{ 
+                      <span style={{
                         background: `hsla(${120 - (sensitivity * 1.2)}, 100%, 50%, 0.15)`,
                         color: `hsl(${120 - (sensitivity * 1.2)}, 100%, 65%)`,
-                        padding: '2px 8px', borderRadius: '10px', fontSize: 10, fontWeight: 'bold', 
+                        padding: '2px 8px', borderRadius: '10px', fontSize: 10, fontWeight: 'bold',
                         border: `1px solid hsla(${120 - (sensitivity * 1.2)}, 100%, 50%, 0.3)`
                       }}>
                         {sensitivity}% {sensitivity > 80 ? '(High)' : sensitivity > 40 ? '(Medium)' : '(Low)'}
                       </span>
                     </div>
-                    <input 
-                      type="range" 
+                    <input
+                      type="range"
                       className="custom-slider"
-                      min="1" 
-                      max="100" 
+                      min="1"
+                      max="100"
                       value={sensitivity}
                       onChange={(e) => setSensitivity(parseInt(e.target.value))}
-                      style={{ 
+                      style={{
                         '--slider-color': `hsl(${120 - (sensitivity * 1.2)}, 100%, 50%)`,
                         background: `linear-gradient(to right, hsl(${120 - (sensitivity * 1.2)}, 100%, 50%) ${sensitivity}%, var(--bg-input) ${sensitivity}%)`,
-                      }} 
+                      }}
                     />
                     <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: 10, marginTop: 4 }}>
                       <span>Fewer Alerts</span>
@@ -1851,7 +1851,7 @@ function App() {
                       Re-index DB
                     </button>
                   </div>
-                  
+
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid var(--border-subtle)' }}>
                     <div>
                       <div style={{ color: 'var(--accent-red)', fontSize: 14 }}>Danger Zone</div>
@@ -1863,7 +1863,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              
+
               <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end', gap: '12px', borderTop: '1px solid var(--border-strong)', paddingTop: '20px' }}>
                 <button onClick={() => setActiveNav('dashboard')} style={{ background: 'var(--bg-input)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>Cancel</button>
                 <button onClick={saveSettings} style={{ background: 'linear-gradient(135deg, var(--accent-purple), var(--accent-cyan))', border: 'none', color: '#fff', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s', boxShadow: 'var(--shadow-glow-purple)' }}>{saveText}</button>
