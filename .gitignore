@@ -1,16 +1,64 @@
-node_modules/
-**/node_modules/
-__pycache__/
-**__pycache__/
-*.pyc
-venv/
-.venv/
+```
+# Environment variables
 .env
-.DS_Store
-dist/
-**/dist/
-.pytest_cache/
+.env.local
+.env.*
+
+# Dependencies
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs and temporary files
 *.log
-*.dll
+*.tmp
+*.swp
+*.swo
+
+# Editor/IDE files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python specific
+__pycache__/
+*.py[cod]
+*$py.class
 *.so
-*.dylib
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Coverage reports
+.coverage
+htmlcov/
+.coverage.*
+.cache
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Docker
+.dockerenv
+```
