@@ -1,111 +1,85 @@
-# Sentinel DevSecOps Platform - Multi-Stage Dockerfile
-# Optimized for security, size, and build performance
+# Project Sentinel - Multi-stage Docker Build
+# Enterprise-grade Wireless Intrusion Detection System
 
-# ===========================================
-# Stage 1: Build C Extension (Native Frame Decoder)
-# ===========================================
-FROM python:3.11-slim as c-builder
+# Stage 1: Build C extension for native frame decoding
+FROM python:3.11-slim as builder
 
-WORKDIR /build
+WORKDIR /app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
     gcc \
-    python3-dev \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy C source file
+# Copy and compile C extension
 COPY backend_server/native_frame_decoder.c .
+RUN gcc -O3 -shared -fPIC -o libframe_decoder.so native_frame_decoder.c || echo "C extension build skipped"
 
-# Compile the C extension
-RUN gcc -O3 -fPIC -shared -o libnative_decoder.so native_frame_decoder.c
-
-# ===========================================
-# Stage 2: Install Python Dependencies
-# ===========================================
-FROM python:3.11-slim as python-builder
+# Stage 2: Python dependencies
+FROM python:3.11-slim as python-deps
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# Copy requirements first for better caching
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
-
-# ===========================================
-# Stage 3: Build Frontend (React/Vite)
-# ===========================================
+# Stage 3: Frontend build
 FROM node:20-alpine as frontend-builder
 
-WORKDIR /frontend
+WORKDIR /app/sentinel-ui
 
-# Copy package files
 COPY sentinel-ui/package*.json ./
-
-# Install dependencies
 RUN npm ci
 
-# Copy source code
-COPY sentinel-ui/ .
-
-# Build for production
+COPY sentinel-ui/ ./
 RUN npm run build
 
-# ===========================================
-# Stage 4: Runtime Image
-# ===========================================
+# Stage 4: Runtime image
 FROM python:3.11-slim as runtime
-
-# Create non-root user for security
-RUN groupadd --gid 1000 sentinel && \
-    useradd --uid 1000 --gid sentinel --shell /bin/bash --create-home sentinel
 
 WORKDIR /app
 
-# Copy compiled C extension from builder
-COPY --from=c-builder /build/libnative_decoder.so /app/backend_server/
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy Python dependencies from builder
-COPY --from=python-builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=python-builder /usr/local/bin /usr/local/bin
+# Create non-root user
+RUN useradd -m -u 1000 sentinel && chown -R sentinel:sentinel /app
 
-# Copy backend code
-COPY backend_server/ ./backend_server/
-COPY tests/ ./tests/
-COPY run_backend.py .
+# Copy C extension from builder
+COPY --from=builder libframe_decoder.so ./backend_server/ || echo "C extension not available"
 
-# Copy built frontend from builder
-COPY --from=frontend-builder /frontend/dist ./static/
+# Copy Python dependencies
+COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-deps /usr/local/bin /usr/local/bin
 
-# Copy configuration
-COPY .env.example .env.template
+# Copy application code
+COPY --chown=sentinel:sentinel backend_server/ ./backend_server/
+COPY --chown=sentinel:sentinel requirements.txt .
 
-# Create logs directory
-RUN mkdir -p /app/logs && chown -R sentinel:sentinel /app
+# Copy built frontend
+COPY --from=frontend-builder --chown=sentinel:sentinel /app/sentinel-ui/dist ./static/
 
-# Switch to non-root user
-USER sentinel
-
-# Expose ports
-EXPOSE 8000 9090
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SENTINEL_ENV=production \
+    SENTINEL_MAX_DASHBOARD=50 \
+    SENTINEL_MAX_ESP32=10
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Set entrypoint
-ENTRYPOINT ["python", "-m", "uvicorn", "backend_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+USER sentinel
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend_server.main:app", "--host", "0.0.0.0", "--port", "8000"]

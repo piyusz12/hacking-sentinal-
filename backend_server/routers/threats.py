@@ -1,87 +1,179 @@
 """
-Threats router for Sentinel DevSecOps Platform.
-Handles threat detection, simulation, and history endpoints.
+Threat detection and simulation router
+Handles threat alerts, simulations, and history
 """
-
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from uuid import uuid4
+import logging
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 
-from backend_server.config import settings
-from backend_server.exceptions import (
-    ValidationError,
-    ThreatAnalysisError,
-    RateLimitError,
-)
+from backend_server.core.config import get_settings
+from backend_server.core.exceptions import ThreatSimulationError, InvalidFrameDataError
 from backend_server.models.schemas import (
-    ThreatType,
-    ThreatSeverity,
-    ThreatSimulationRequest,
-    ThreatInfo,
-    ThreatListResponse,
-    ActionResponse,
+    ThreatAlert, ThreatSimulationRequest, ThreatInfo, 
+    ThreatListResponse, ThreatSeverity, ThreatType
 )
+from backend_server.services.ai_engine import ai_engine
 
-# Router instance
+logger = logging.getLogger(__name__)
+settings = get_settings()
 router = APIRouter(prefix="/api/threats", tags=["threats"])
 
-# In-memory storage (will be replaced with database)
+# In-memory threat storage (to be replaced with database)
 threat_history: List[Dict[str, Any]] = []
-total_threats_detected = 0
+active_simulations: Dict[str, bool] = {}
 
 
-def calculate_severity(threat_type: str, packet_count: int, rssi: int) -> str:
-    """Calculate threat severity based on type and intensity."""
-    threat_type_upper = threat_type.upper()
-    
-    if "DEAUTH" in threat_type_upper or "KRACK" in threat_type_upper:
-        if packet_count > 1000:
-            return ThreatSeverity.CRITICAL.value
-        elif packet_count > 500:
-            return ThreatSeverity.HIGH.value
-        else:
-            return ThreatSeverity.MEDIUM.value
-    
-    if "BEACON_FLOOD" in threat_type_upper or "PROBE_FLOOD" in threat_type_upper:
-        if packet_count > 2000:
-            return ThreatSeverity.HIGH.value
-        elif packet_count > 1000:
-            return ThreatSeverity.MEDIUM.value
-        else:
-            return ThreatSeverity.LOW.value
-    
-    if "EVIL_TWIN" in threat_type_upper:
-        return ThreatSeverity.HIGH.value
-    
-    return ThreatSeverity.MEDIUM.value
+@router.post("/alert")
+async def receive_threat_alert(alert: ThreatAlert):
+    """Receive threat alert from ESP32 hardware"""
+    try:
+        threat_id = str(uuid4())
+        threat_record = {
+            "id": threat_id,
+            **alert.model_dump(),
+            "ai_analyzed": False,
+            "mitigation": None
+        }
+        
+        # Add to history with limit
+        threat_history.insert(0, threat_record)
+        if len(threat_history) > settings.threat_history_limit:
+            threat_history.pop()
+        
+        # Trigger AI analysis in background
+        asyncio.create_task(analyze_threat_async(threat_record))
+        
+        return {"success": True, "threat_id": threat_id}
+    except InvalidFrameDataError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process alert: {str(e)}")
 
 
-@router.get("", response_model=ThreatListResponse)
-async def get_threats(
-    limit: int = Query(default=50, ge=1, le=200, description="Maximum threats to return"),
-    threat_type: Optional[ThreatType] = Query(default=None, description="Filter by threat type"),
-    severity: Optional[ThreatSeverity] = Query(default=None, description="Filter by severity"),
+async def analyze_threat_async(threat_record: Dict[str, Any]):
+    """Analyze threat with AI engine in background"""
+    try:
+        analysis = await ai_engine.analyze_threat(threat_record)
+        threat_record["ai_analyzed"] = True
+        threat_record["analysis"] = analysis
+        threat_record["mitigation"] = "\n".join(analysis.get("mitigation_steps", []))
+        
+        logger.info(f"Threat {threat_record['id']} analyzed: {analysis['confidence_score']}")
+    except Exception as e:
+        logger.error(f"AI analysis failed for threat {threat_record['id']}: {e}")
+        threat_record["ai_analyzed"] = False
+
+
+@router.post("/simulate")
+async def simulate_threat(request: ThreatSimulationRequest, background_tasks: BackgroundTasks):
+    """Simulate a network attack for testing"""
+    try:
+        simulation_id = str(uuid4())
+        active_simulations[simulation_id] = True
+        
+        # Calculate packet parameters based on intensity
+        intensity_multipliers = {"low": 10, "medium": 50, "high": 150, "extreme": 500}
+        packets_per_second = intensity_multipliers.get(request.intensity, 50)
+        
+        background_tasks.add_task(
+            run_simulation,
+            simulation_id,
+            request.threat_type,
+            request.target_mac,
+            request.duration_seconds,
+            packets_per_second
+        )
+        
+        return {
+            "success": True,
+            "simulation_id": simulation_id,
+            "message": f"Starting {request.threat_type.value} simulation for {request.duration_seconds}s"
+        }
+    except Exception as e:
+        raise ThreatSimulationError(str(e))
+
+
+async def run_simulation(
+    simulation_id: str,
+    threat_type: ThreatType,
+    target_mac: Optional[str],
+    duration: int,
+    pps: int
 ):
-    """
-    Retrieve threat history with optional filtering.
-    
-    Returns paginated list of detected threats with metadata.
-    """
-    filtered = threat_history.copy()
+    """Run threat simulation and generate fake packets"""
+    try:
+        end_time = datetime.utcnow() + timedelta(seconds=duration)
+        packet_count = 0
+        
+        while datetime.utcnow() < end_time and active_simulations.get(simulation_id):
+            # Map threat type enum properly
+            threat_type_map = {
+                "deauth": "DEAUTH_STORM",
+                "beacon_flood": "BEACON_SPAM", 
+                "probe_flood": "PROBE_FLOOD",
+                "evil_twin": "EVIL_TWIN",
+                "krack": "CUSTOM",
+                "unknown": "CUSTOM"
+            }
+            sim_type_str = threat_type_map.get(threat_type.value, "CUSTOM")
+            sim_threat_type = getattr(ThreatType, sim_type_str, ThreatType.UNKNOWN)
+            
+            # Generate simulated threat data
+            simulated_threat = ThreatAlert(
+                threat_type=sim_threat_type,
+                severity=ThreatSeverity.HIGH if pps > 100 else ThreatSeverity.MEDIUM,
+                source_mac="SIMULATED:AA:BB:CC:DD:EE",
+                target_mac=target_mac or "FF:FF:FF:FF:FF:FF",
+                packet_count=pps,
+                packets_per_second=float(pps),
+                frame_samples=[]
+            )
+            
+            # Process as real threat
+            threat_record = {
+                "id": str(uuid4()),
+                **simulated_threat.model_dump(),
+                "ai_analyzed": False,
+                "mitigation": None,
+                "simulated": True
+            }
+            
+            threat_history.insert(0, threat_record)
+            if len(threat_history) > settings.threat_history_limit:
+                threat_history.pop()
+            
+            packet_count += pps
+            await asyncio.sleep(1)
+        
+        active_simulations.pop(simulation_id, None)
+        logger.info(f"Simulation {simulation_id} completed: {packet_count} packets generated")
+        
+    except Exception as e:
+        logger.error(f"Simulation {simulation_id} failed: {e}")
+        active_simulations.pop(simulation_id, None)
+
+
+@router.get("")
+async def get_threats(
+    limit: int = Query(default=50, ge=1, le=200),
+    threat_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    ai_analyzed: Optional[bool] = None
+):
+    """Get threat history with optional filtering"""
+    filtered = threat_history[:limit]
     
     if threat_type:
-        filtered = [t for t in filtered if t.get("threat_type") == threat_type.value]
-    
+        filtered = [t for t in filtered if t.get('threat_type') == threat_type]
     if severity:
-        filtered = [t for t in filtered if t.get("severity") == severity.value]
-    
-    # Sort by timestamp descending and apply limit
-    filtered.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    filtered = filtered[:limit]
+        filtered = [t for t in filtered if t.get('severity') == severity]
+    if ai_analyzed is not None:
+        filtered = [t for t in filtered if t.get('ai_analyzed') == ai_analyzed]
     
     return ThreatListResponse(
         threats=[ThreatInfo(**t) for t in filtered],
@@ -90,170 +182,17 @@ async def get_threats(
     )
 
 
-@router.get("/recent", response_model=List[ThreatInfo])
-async def get_recent_threats(count: int = Query(default=10, ge=1, le=50)):
-    """Get most recent threats without full metadata."""
-    recent = sorted(threat_history, key=lambda x: x.get("timestamp", ""), reverse=True)[:count]
-    return [ThreatInfo(**t) for t in recent]
-
-
-@router.post("/simulate", response_model=ActionResponse)
-async def simulate_threat(
-    request: ThreatSimulationRequest,
-    background_tasks: BackgroundTasks
-):
-    """
-    Simulate a network threat for testing purposes.
-    
-    Creates a synthetic threat event that flows through the detection pipeline.
-    """
-    global total_threats_detected
-    
-    if not settings.enable_threat_simulation:
-        raise ValidationError(
-            message="Threat simulation is disabled",
-            details={"setting": "enable_threat_simulation"}
-        )
-    
-    try:
-        # Generate threat payload
-        threat_id = str(uuid4())
-        timestamp = datetime.now(timezone.utc).isoformat()
-        
-        severity = calculate_severity(
-            threat_type=request.threat_type.value,
-            packet_count=100 if request.intensity == "low" else 500 if request.intensity == "medium" else 1500,
-            rssi=-50
-        )
-        
-        threat_data = {
-            "id": threat_id,
-            "timestamp": timestamp,
-            "threat_type": request.threat_type.value,
-            "severity": severity,
-            "source_mac": request.target_mac or "DE:AD:BE:EF:00:01",
-            "target_mac": request.target_mac or "FF:FF:FF:FF:FF:FF",
-            "channel": 6,
-            "signal_strength": -50,
-            "description": f"Simulated {request.threat_type.value} attack at intensity {request.intensity}",
-            "mitigation": None,
-            "ai_analyzed": False,
-            "simulated": True
-        }
-        
-        # Add to history
-        threat_history.append(threat_data)
-        total_threats_detected += 1
-        
-        # Enforce max history limit
-        if len(threat_history) > settings.max_threat_history:
-            threat_history.pop(0)
-        
-        logger.info(f"🚨 Simulated threat: {request.threat_type.value} (ID: {threat_id})")
-        
-        # Background task: trigger AI analysis if enabled
-        if settings.enable_ai_analysis:
-            background_tasks.add_task(analyze_threat_async, threat_data)
-        
-        return ActionResponse(
-            success=True,
-            message=f"Threat simulated successfully: {request.threat_type.value}",
-            data={"threat_id": threat_id, "severity": severity}
-        )
-        
-    except Exception as e:
-        logger.error(f"Threat simulation failed: {e}")
-        raise ThreatAnalysisError(
-            message="Failed to simulate threat",
-            details={"error": str(e)}
-        )
-
-
-async def analyze_threat_async(threat_data: Dict[str, Any]):
-    """Background task to analyze threat with AI."""
-    # This would call the AI engine
-    # For now, just mark as analyzed
-    threat_data["ai_analyzed"] = True
-    threat_data["mitigation"] = "AI analysis pending implementation"
-
-
-@router.delete("/clear", response_model=ActionResponse)
+@router.delete("")
 async def clear_threats():
-    """Clear all threat history."""
-    global threat_history, total_threats_detected
-    
-    count = len(threat_history)
+    """Clear all threat history"""
     threat_history.clear()
-    
-    logger.info(f"Cleared {count} threats from history")
-    
-    return ActionResponse(
-        success=True,
-        message=f"Cleared {count} threats",
-        data={"cleared_count": count}
-    )
+    return {"success": True, "message": "Threat history cleared"}
 
 
-@router.delete("/{threat_id}", response_model=ActionResponse)
-async def delete_threat(threat_id: str):
-    """Delete a specific threat by ID."""
-    global threat_history
-    
-    original_count = len(threat_history)
-    threat_history = [t for t in threat_history if t.get("id") != threat_id]
-    
-    if len(threat_history) == original_count:
-        raise ValidationError(
-            message=f"Threat with ID {threat_id} not found",
-            details={"threat_id": threat_id}
-        )
-    
-    return ActionResponse(
-        success=True,
-        message=f"Deleted threat {threat_id}",
-        data={"deleted_id": threat_id}
-    )
-
-
-@router.get("/stats")
-async def get_threat_stats():
-    """Get threat statistics and analytics."""
-    if not threat_history:
-        return {
-            "total_threats": 0,
-            "threats_by_type": {},
-            "threats_by_severity": {},
-            "last_hour_count": 0
-        }
-    
-    # Calculate statistics
-    threats_by_type = {}
-    threats_by_severity = {}
-    last_hour_count = 0
-    
-    now = datetime.now(timezone.utc)
-    
+@router.get("/{threat_id}")
+async def get_threat(threat_id: str):
+    """Get specific threat details"""
     for threat in threat_history:
-        # Count by type
-        ttype = threat.get("threat_type", "UNKNOWN")
-        threats_by_type[ttype] = threats_by_type.get(ttype, 0) + 1
-        
-        # Count by severity
-        sev = threat.get("severity", "unknown")
-        threats_by_severity[sev] = threats_by_severity.get(sev, 0) + 1
-        
-        # Count last hour
-        try:
-            threat_time = datetime.fromisoformat(threat.get("timestamp", ""))
-            if (now - threat_time).total_seconds() < 3600:
-                last_hour_count += 1
-        except (ValueError, TypeError):
-            pass
-    
-    return {
-        "total_threats": len(threat_history),
-        "total_detected_all_time": total_threats_detected,
-        "threats_by_type": threats_by_type,
-        "threats_by_severity": threats_by_severity,
-        "last_hour_count": last_hour_count
-    }
+        if threat["id"] == threat_id:
+            return ThreatInfo(**threat)
+    raise HTTPException(status_code=404, detail="Threat not found")
