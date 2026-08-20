@@ -55,8 +55,8 @@ def test_frontend_index_css():
     assert "font-family" in content
 
 def test_firmware_ino_structure():
-    ino_path = os.path.join(WORKSPACE_ROOT, "sentinal-v2", "sentinal-v2.ino")
-    assert os.path.exists(ino_path), "sentinal-v2.ino missing"
+    ino_path = os.path.join(WORKSPACE_ROOT, "sentinel_v3", "sentinel_v3.ino")
+    assert os.path.exists(ino_path), "sentinel_v3.ino missing"
     
     with open(ino_path, "r", encoding="utf-8") as f:
         code = f.read()
@@ -64,26 +64,32 @@ def test_firmware_ino_structure():
     # Required headers
     headers = [
         "#include <WiFi.h>",
-        "#include <WebServer.h>",
-        "#include <DNSServer.h>",
         "#include <esp_wifi.h>",
+        "#include <WebSocketsClient.h>",
+        "#include <ArduinoJson.h>",
         "#include <Adafruit_SSD1306.h>",
-        "#include <driver/i2s.h>"
+        "#include <Adafruit_NeoPixel.h>",
+        "#include \"driver/i2s.h\""
     ]
     for h in headers:
-        assert h in code, f"Header {h} missing in sentinal-v2.ino"
+        assert h in code, f"Header {h} missing in sentinel_v3.ino"
 
     # Verify pin configuration
     assert "#define OLED_SDA" in code
     assert "#define OLED_SCL" in code
-    assert "#define I2S_WS" in code
-    assert "#define I2S_SCK" in code
-    assert "#define I2S_SD" in code
+    assert "#define BUZZER_PIN" in code
+    assert "#define RGB_PIN" in code
+    assert "#define MIC_I2S_PORT" in code
+    assert "#define SPK_I2S_PORT" in code
 
-    # Verify clap / voice command configuration
-    assert "CLAP_THRESHOLD" in code
-    assert "CLAP_DEBOUNCE_MS" in code
-    assert "CLAP_WINDOW_MS" in code
+    # Verify key routines
+    assert "void oledSafe(" in code
+    assert "void oledAlert(" in code
+    assert "void oledMonitoring(" in code
+    assert "void updateRGB()" in code
+    assert "void buzzerBootChime()" in code
+    assert "void playAlertAlarm()" in code
+    assert "void playAllClear()" in code
 
     # Verify setup and loop functions
     assert "void setup()" in code

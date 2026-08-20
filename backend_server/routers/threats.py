@@ -4,12 +4,15 @@ Handles threat detection, simulation, and history endpoints.
 """
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("sentinel.threats")
 
 from backend_server.config import settings
 from backend_server.exceptions import (

@@ -1,0 +1,16 @@
+CompileFlags:
+  CompilationDatabase: "."
+  Add:
+    - "-xc++"
+    - "-std=c++17"
+    - "-DESP32=1"
+    - "-DESP32S3=1"
+    - "-DARDUINO=10819"
+    - "-DARDUINO_ARCH_ESP32=1"
+
+Diagnostics:
+  Suppress:
+    - "drv_unknown_argument"
+    - "drv_unsupported_opt"
+    - "*"
+    - "unable to handle compilation*"

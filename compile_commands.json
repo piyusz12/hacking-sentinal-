@@ -1,0 +1,50 @@
+[
+  {
+    "directory": "c:/Users/piyush/OneDrive/Desktop/sentinal server",
+    "arguments": [
+      "clang++",
+      "-x",
+      "c++",
+      "-std=c++17",
+      "-DESP32=1",
+      "-DESP32S3=1",
+      "-DARDUINO=10819",
+      "-DARDUINO_ARCH_ESP32=1",
+      "-c",
+      "sentinel_v3/sentinel_v3.ino"
+    ],
+    "file": "sentinel_v3/sentinel_v3.ino"
+  },
+  {
+    "directory": "c:/Users/piyush/OneDrive/Desktop/sentinal server",
+    "arguments": [
+      "clang++",
+      "-x",
+      "c++",
+      "-std=c++17",
+      "-DESP32=1",
+      "-DESP32S3=1",
+      "-DARDUINO=10819",
+      "-DARDUINO_ARCH_ESP32=1",
+      "-c",
+      "c:/Users/piyush/OneDrive/Desktop/sentinal server/sentinel_v3/sentinel_v3.ino"
+    ],
+    "file": "c:/Users/piyush/OneDrive/Desktop/sentinal server/sentinel_v3/sentinel_v3.ino"
+  },
+  {
+    "directory": "c:/Users/piyush/OneDrive/Desktop/sentinal server",
+    "arguments": [
+      "clang++",
+      "-x",
+      "c++",
+      "-std=c++17",
+      "-DESP32=1",
+      "-DESP32S3=1",
+      "-DARDUINO=10819",
+      "-DARDUINO_ARCH_ESP32=1",
+      "-c",
+      "C:\\Users\\piyush\\OneDrive\\Desktop\\sentinal server\\sentinel_v3\\sentinel_v3.ino"
+    ],
+    "file": "C:\\Users\\piyush\\OneDrive\\Desktop\\sentinal server\\sentinel_v3\\sentinel_v3.ino"
+  }
+]
