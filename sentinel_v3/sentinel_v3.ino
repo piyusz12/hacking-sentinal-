@@ -520,39 +520,90 @@ void audioAlarmTask(void* pvParams) {
   while (true) {
     if (xQueueReceive(audioQueue, &cmd, portMAX_DELAY) == pdTRUE) {
       switch (cmd) {
-        case CMD_AUDIO_ALERT:
+        case CMD_AUDIO_ALERT: {
           Serial.println("[AUDIO] !! THREAT ALARM !!");
-          for (int i = 0; i < 3; i++) {
-            tone(BUZZER_PIN, 2500, 100);
-            if (hw_spk_ok) spkTone(1800, 100); else delay(100);
-            noTone(BUZZER_PIN);
-            delay(40);
-            tone(BUZZER_PIN, 3000, 80);
-            if (hw_spk_ok) spkTone(2200, 80); else delay(80);
-            noTone(BUZZER_PIN);
-            delay(30);
+          String t = String(g_alert_type);
+          t.toUpperCase();
+          
+          if (t.indexOf("DEAUTH") != -1) {
+            // Aggressive high-low siren (Police style)
+            for (int i = 0; i < 4; i++) {
+              tone(BUZZER_PIN, 2500, 100);
+              if (hw_spk_ok) spkTone(1800, 100); else delay(100);
+              noTone(BUZZER_PIN); delay(20);
+              tone(BUZZER_PIN, 1800, 100);
+              if (hw_spk_ok) spkTone(1200, 100); else delay(100);
+              noTone(BUZZER_PIN); delay(20);
+            }
+          } else if (t.indexOf("EVIL") != -1 || t.indexOf("TWIN") != -1) {
+            // Evil Twin: Rapid sharp bursts
+            for (int i = 0; i < 6; i++) {
+              tone(BUZZER_PIN, 3500, 40);
+              if (hw_spk_ok) spkTone(2500, 40); else delay(40);
+              noTone(BUZZER_PIN); delay(60);
+            }
+          } else if (t.indexOf("BEACON") != -1) {
+            // Beacon Flood: Fast alternating triplets
+            for (int i = 0; i < 3; i++) {
+              tone(BUZZER_PIN, 1000, 60); delay(60); noTone(BUZZER_PIN);
+              tone(BUZZER_PIN, 1500, 60); delay(60); noTone(BUZZER_PIN);
+              tone(BUZZER_PIN, 2000, 60); delay(60); noTone(BUZZER_PIN);
+              delay(50);
+            }
+          } else if (t.indexOf("PROBE") != -1) {
+            // Probe Recon: Sonar-like pings
+            for (int i = 0; i < 3; i++) {
+              tone(BUZZER_PIN, 3000, 50);
+              if (hw_spk_ok) spkTone(2800, 50); else delay(50);
+              noTone(BUZZER_PIN); delay(200);
+            }
+          } else if (t.indexOf("KARMA") != -1) {
+            // Karma: Low frequency buzzes
+            for (int i = 0; i < 5; i++) {
+              tone(BUZZER_PIN, 800, 80);
+              if (hw_spk_ok) spkTone(500, 80); else delay(80);
+              noTone(BUZZER_PIN); delay(40);
+            }
+          } else if (t.indexOf("PMKID") != -1) {
+            // PMKID: Sweeping tone burst
+            for (int i = 0; i < 2; i++) {
+              for (int f = 1000; f < 3000; f += 200) {
+                tone(BUZZER_PIN, f, 15);
+                delay(15);
+              }
+              noTone(BUZZER_PIN); delay(50);
+            }
+          } else {
+            // Default: Standard rising siren
+            for (int i = 0; i < 3; i++) {
+              tone(BUZZER_PIN, 2500, 100);
+              if (hw_spk_ok) spkTone(1800, 100); else delay(100);
+              noTone(BUZZER_PIN); delay(40);
+              tone(BUZZER_PIN, 3000, 80);
+              if (hw_spk_ok) spkTone(2200, 80); else delay(80);
+              noTone(BUZZER_PIN); delay(30);
+            }
           }
           break;
+        }
         case CMD_AUDIO_ALL_CLEAR:
-          Serial.println("[AUDIO] Threat contained — All Clear");
-          buzzerAllClear();
-          if (hw_spk_ok) {
-            spkTone(784, 90); spkTone(0, 30);
-            spkTone(659, 90); spkTone(0, 30);
-            spkTone(523, 160);
-          }
+          Serial.println("[AUDIO] Threat contained — All Clear (Silenced)");
+          // buzzerAllClear();
+          // if (hw_spk_ok) { ... }
           break;
         case CMD_AUDIO_VOICE_ACK:
-          buzzerVoiceAck();
+          // buzzerVoiceAck(); (Silenced)
           break;
         case CMD_AUDIO_WS_CONN:
-          buzzerWsConnect();
+          Serial.println("[AUDIO] WS Connected (Silenced)");
+          // buzzerWsConnect();
           break;
         case CMD_AUDIO_WS_DISC:
-          buzzerWsDisconnect();
+          Serial.println("[AUDIO] WS Disconnected (Silenced)");
+          // buzzerWsDisconnect();
           break;
         case CMD_AUDIO_RESET:
-          buzzerTone(500, 100);
+          // buzzerTone(500, 100); (Silenced)
           break;
       }
     }

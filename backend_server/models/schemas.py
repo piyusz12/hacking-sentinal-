@@ -13,6 +13,17 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 # ============== Enums ==============
 
+class ThreatAlert(BaseModel):
+    """Real-time threat alert from hardware."""
+    threat_type: str = Field(..., description="Type of threat detected")
+    severity: str = Field(..., description="Severity level")
+    source_mac: Optional[str] = Field(default=None, description="Source MAC address")
+    target_mac: Optional[str] = Field(default=None, description="Target MAC address")
+    packet_count: int = Field(default=0, description="Number of packets")
+    packets_per_second: float = Field(default=0.0, description="Packets per second rate")
+    frame_samples: List[Any] = Field(default_factory=list, description="Samples of captured frames")
+
+
 class ThreatSeverity(str, Enum):
     """Threat severity levels."""
     LOW = "low"

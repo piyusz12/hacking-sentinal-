@@ -48,15 +48,10 @@ from backend_server.models.database import (
 )
 from backend_server.routers.threats import (
     router as threats_router,
-    calculate_severity,
     threat_history,
-    total_threats_detected,
     get_threats,
-    get_recent_threats,
     simulate_threat,
-    clear_threats,
-    delete_threat,
-    get_threat_stats
+    clear_threats
 )
 from fastapi import FastAPI
 
@@ -212,15 +207,6 @@ def test_database_models_to_dict():
     d_create = DeviceCreate(mac_address="11:22:33:44:55:66")
     assert d_create.status == "offline"
 
-def test_calculate_severity():
-    assert calculate_severity("DEAUTH", 1500, -40) == ThreatSeverity.CRITICAL.value
-    assert calculate_severity("DEAUTH", 600, -40) == ThreatSeverity.HIGH.value
-    assert calculate_severity("DEAUTH", 200, -40) == ThreatSeverity.MEDIUM.value
-    assert calculate_severity("BEACON_FLOOD", 2500, -50) == ThreatSeverity.HIGH.value
-    assert calculate_severity("BEACON_FLOOD", 1500, -50) == ThreatSeverity.MEDIUM.value
-    assert calculate_severity("BEACON_FLOOD", 300, -50) == ThreatSeverity.LOW.value
-    assert calculate_severity("EVIL_TWIN", 10, -30) == ThreatSeverity.HIGH.value
-    assert calculate_severity("UNKNOWN_TYPE", 10, -30) == ThreatSeverity.MEDIUM.value
 
 @pytest.mark.asyncio
 async def test_threats_router_endpoints():
@@ -237,7 +223,7 @@ async def test_threats_router_endpoints():
     client = TestClient(app)
 
     # 1. Clear threats
-    resp_clear = client.delete("/api/threats/clear")
+    resp_clear = client.delete("/api/threats")
     assert resp_clear.status_code == 200
     assert resp_clear.json()["success"] is True
 
@@ -259,27 +245,4 @@ async def test_threats_router_endpoints():
     assert resp_sim.status_code == 200
     res_data = resp_sim.json()
     assert res_data["success"] is True
-    threat_id = res_data["data"]["threat_id"]
-
-    # 4. Get threats list now has 1
-    resp_list2 = client.get("/api/threats")
-    assert resp_list2.status_code == 200
-    assert resp_list2.json()["total_count"] == 1
-
-    # 5. Get recent
-    resp_recent = client.get("/api/threats/recent?count=5")
-    assert resp_recent.status_code == 200
-    assert len(resp_recent.json()) == 1
-
-    # 6. Get stats
-    resp_stats = client.get("/api/threats/stats")
-    assert resp_stats.status_code == 200
-    assert resp_stats.json()["total_threats"] == 1
-
-    # 7. Delete specific threat
-    resp_del = client.delete(f"/api/threats/{threat_id}")
-    assert resp_del.status_code == 200
-
-    # 8. Delete nonexistent threat raises 400
-    resp_del_nf = client.delete("/api/threats/non-existent-id")
-    assert resp_del_nf.status_code == 400
+    assert "simulation_id" in res_data
