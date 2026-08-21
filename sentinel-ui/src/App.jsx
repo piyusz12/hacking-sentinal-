@@ -799,6 +799,35 @@ function App() {
     addSystemLog('INFO', 'OLED', `📺 OLED display switched to ALERT mode — showing ${preset.name} details`);
     addSystemLog('INFO', 'SYSTEM', `📡 Dispatching ${preset.id} to LangGraph AI pipeline for real-time forensic analysis`);
 
+    // 📋 Add to threat feed log immediately so it appears in Threat History
+    const launchEntry = {
+      type: 'raw_alert',
+      threat_type: preset.id,
+      attacker_mac: attackMac,
+      target_mac: 'FF:FF:FF:FF:FF:FF',
+      channel: attackChannel,
+      rssi: attackRssi,
+      packet_count: attackPkts,
+      pkt_rate: attackPkts,
+      received_at: new Date().toISOString(),
+      data: {
+        threat_type: preset.id,
+        attacker_mac: attackMac,
+        target_mac: 'FF:FF:FF:FF:FF:FF',
+        channel: attackChannel,
+        rssi: attackRssi,
+        packet_count: attackPkts,
+      },
+    };
+    setThreatFeed(prev => [launchEntry, ...prev].slice(0, 100));
+    setThreatCount(prev => prev + 1);
+    setWifiStatus("ALERT");
+    setPktRate(attackPkts);
+    setActiveChannel(attackChannel);
+    setAttacker({ mac: attackMac, x: 0.15, y: 0.45 });
+    setAiLoading(true);
+    setAiReport(null);
+
     try {
       await fetch(`${BACKEND_URL}/api/threats/simulate`, {
         method: 'POST',
