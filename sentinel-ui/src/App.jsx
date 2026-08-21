@@ -499,8 +499,8 @@ function playBuzzerAlarm() {
 // ─── Main App Component ──────────────────────────────────────────
 function App() {
   const [activeNav, setActiveNav] = useState('dashboard');
-  const [cpuHistory] = useState(generateCpuHistory);
-  const [networkData] = useState(generateNetworkData);
+  const [cpuHistory, setCpuHistory] = useState(generateCpuHistory);
+  const [networkData, setNetworkData] = useState(generateNetworkData);
   const [uptimeSegments] = useState(generateUptimeSegments);
   const [chartTab, setChartTab] = useState('24h');
 
@@ -605,7 +605,15 @@ function App() {
     setAiReport(null);
     setAiLoading(false);
     setOledDetail(null);
+    // Restore resource metrics to baseline
+    setLiveMetrics(prev => ({
+      cpu: Math.max(35, prev.cpu - 20 - Math.round(Math.random() * 10)),
+      memory: Math.max(45, prev.memory - 10 - Math.round(Math.random() * 8)),
+      disk: prev.disk,
+      network: 280 + Math.round(Math.random() * 80),
+    }));
     addSystemLog('INFO', 'SYSTEM', 'Active incident cleared — returning to SAFE state');
+    addSystemLog('SUCCESS', 'SYSTEM', '📊 Resource utilization returning to baseline levels');
     try {
       await fetch(`${BACKEND_URL}/api/threats/clear`, { method: 'POST' });
     } catch {
@@ -711,13 +719,37 @@ function App() {
     } else if (lastMessage.type === 'esp32_voice_event') {
       setVoiceEvent(lastMessage.raw || `${lastMessage.claps} claps → ${lastMessage.command}`);
       setTimeout(() => setVoiceEvent(null), 4000);
-    } else if (lastMessage.type === 'esp32_telemetry') {
-      if (lastMessage.data) {
-        setLiveMetrics(prev => ({
-          ...prev,
-          network: Math.round((lastMessage.data.pkt_rate || prev.network) / 10) || prev.network,
-        }));
-      }
+    } else if (lastMessage.type === 'system_metrics') {
+      const data = lastMessage.data;
+      setLiveMetrics(prev => ({
+        ...prev,
+        cpu: data.cpu,
+        memory: data.memory,
+        disk: data.disk,
+        network: data.network,
+      }));
+
+      const now = new Date();
+      const timeLabel = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+      
+      setCpuHistory(prev => [
+        ...prev.slice(-29),
+        {
+          time: timeLabel,
+          cpu: data.cpu,
+          memory: data.memory,
+          network: data.network,
+        }
+      ]);
+
+      setNetworkData(prev => [
+        ...prev.slice(-11),
+        {
+          time: timeLabel,
+          inbound: data.inbound,
+          outbound: data.outbound,
+        }
+      ]);
     } else if (lastMessage.type === 'esp32_status') {
       if (lastMessage.status === 'online') {
         setSerialConnected(true);
@@ -727,20 +759,9 @@ function App() {
     }
   }, [lastMessage, clearActiveIncident]);
 
-  // Fetch metrics & devices from backend
+  // Fetch initial devices/ports from backend (metrics now via WS)
   const refreshBackendData = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/system/metrics`);
-      if (res.ok) {
-        const data = await res.json();
-        setLiveMetrics(prev => ({
-          cpu: data.cpu || prev.cpu,
-          memory: data.memory || prev.memory,
-          disk: data.disk || prev.disk,
-          network: Math.round((data.network_bytes_recv || 1024000) / 1024 / 100),
-        }));
-      }
-
       // Fetch serial ports
       const portRes = await fetch(`${BACKEND_URL}/api/serial/ports`);
       if (portRes.ok) {
@@ -752,17 +773,27 @@ function App() {
         setSerialConnected(portData.bridge_status?.is_running || false);
       }
     } catch {
-      // Backend not reached, keep smooth fallback
+      // Backend not reached
     }
   }, [selectedPort]);
 
   useEffect(() => {
-    const interval = setInterval(refreshBackendData, 3000);
+    const interval = setInterval(refreshBackendData, 5000);
     refreshBackendData();
     return () => {
       clearInterval(interval);
     };
   }, [refreshBackendData]);
+
+  const liveMetricsRef = useRef(liveMetrics);
+  useEffect(() => { liveMetricsRef.current = liveMetrics; }, [liveMetrics]);
+
+        }
+      ]);
+    }, 2000);
+
+    return () => clearInterval(chartInterval);
+  }, []);
 
   // Launch Attack Simulation
   const triggerSimulation = async (preset = selectedPreset) => {
@@ -798,6 +829,15 @@ function App() {
     addSystemLog('WARNING', 'BUZZER', `🔊 Piezo buzzer alarm triggered — ${preset.name} attack siren active`);
     addSystemLog('INFO', 'OLED', `📺 OLED display switched to ALERT mode — showing ${preset.name} details`);
     addSystemLog('INFO', 'SYSTEM', `📡 Dispatching ${preset.id} to LangGraph AI pipeline for real-time forensic analysis`);
+
+    // 📊 Spike resource utilization during attack
+    setLiveMetrics(prev => ({
+      cpu: Math.min(100, prev.cpu + 20 + Math.round(Math.random() * 15)),
+      memory: Math.min(100, prev.memory + 10 + Math.round(Math.random() * 10)),
+      disk: prev.disk,
+      network: Math.round(attackPkts * 0.8 + Math.random() * 200),
+    }));
+    addSystemLog('WARNING', 'SYSTEM', `📊 Resource spike detected — CPU/Memory/Network elevated due to ${preset.name} processing`);
 
     // 📋 Add to threat feed log immediately so it appears in Threat History
     const launchEntry = {
