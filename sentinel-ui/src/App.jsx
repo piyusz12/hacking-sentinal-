@@ -9,7 +9,7 @@ import {
   TrendingDown, Database, BarChart3, ChevronRight, RefreshCw,
   MemoryStick, Radio, ShieldAlert, Zap, WifiOff, Activity,
   Code, Play, Send, Bot, Download,
-  Power, Usb, Volume2, Sparkles, Trash2
+  Power, Usb, Volume2, Sparkles, Trash2, Terminal
 } from 'lucide-react';
 import './index.css';
 
@@ -442,6 +442,60 @@ function useWebSocket(url) {
   return { isConnected, lastMessage };
 }
 
+// ─── Buzzer Alarm Sound System ───────────────────────────────────
+function playBuzzerAlarm() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+
+    // Multi-tone siren sequence for dramatic effect
+    const tones = [
+      { freq: 880, start: 0, dur: 0.12 },
+      { freq: 1100, start: 0.12, dur: 0.12 },
+      { freq: 880, start: 0.24, dur: 0.12 },
+      { freq: 1320, start: 0.36, dur: 0.15 },
+      { freq: 660, start: 0.51, dur: 0.10 },
+      { freq: 1100, start: 0.61, dur: 0.12 },
+      { freq: 1400, start: 0.73, dur: 0.18 },
+    ];
+
+    tones.forEach(({ freq, start, dur }) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(freq, now + start);
+      gain.gain.setValueAtTime(0, now + start);
+      gain.gain.linearRampToValueAtTime(0.15, now + start + 0.02);
+      gain.gain.linearRampToValueAtTime(0.12, now + start + dur * 0.7);
+      gain.gain.linearRampToValueAtTime(0, now + start + dur);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + dur);
+    });
+
+    // Underlying warning sweep
+    const sweepOsc = audioCtx.createOscillator();
+    const sweepGain = audioCtx.createGain();
+    sweepOsc.type = 'sawtooth';
+    sweepOsc.frequency.setValueAtTime(200, now);
+    sweepOsc.frequency.exponentialRampToValueAtTime(600, now + 0.45);
+    sweepOsc.frequency.exponentialRampToValueAtTime(200, now + 0.91);
+    sweepGain.gain.setValueAtTime(0.04, now);
+    sweepGain.gain.linearRampToValueAtTime(0.06, now + 0.45);
+    sweepGain.gain.linearRampToValueAtTime(0, now + 0.91);
+    sweepOsc.connect(sweepGain);
+    sweepGain.connect(audioCtx.destination);
+    sweepOsc.start(now);
+    sweepOsc.stop(now + 0.91);
+
+    // Close audio context after sound finishes
+    setTimeout(() => audioCtx.close(), 1200);
+  } catch (e) {
+    console.error('Buzzer alarm failed:', e);
+  }
+}
+
 // ─── Main App Component ──────────────────────────────────────────
 function App() {
   const [activeNav, setActiveNav] = useState('dashboard');
@@ -468,6 +522,23 @@ function App() {
   const [attacker, setAttacker] = useState(null);
   const [aiReport, setAiReport] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
+
+  // OLED display detail state
+  const [oledDetail, setOledDetail] = useState(null);
+
+  // System logs for Alert Logs section
+  const [systemLogs, setSystemLogs] = useState([]);
+  const addSystemLog = useCallback((level, source, message, details = {}) => {
+    const entry = {
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      level,   // 'CRITICAL' | 'WARNING' | 'INFO' | 'SUCCESS'
+      source,  // 'BUZZER' | 'OLED' | 'SIMULATOR' | 'AI_AGENT' | 'SENSOR' | 'SYSTEM'
+      message,
+      details,
+    };
+    setSystemLogs(prev => [entry, ...prev].slice(0, 200));
+  }, []);
   const [firmwareTab, setFirmwareTab] = useState(0);
 
   // Simulation parameters
@@ -533,12 +604,14 @@ function App() {
     setPktRate(183);
     setAiReport(null);
     setAiLoading(false);
+    setOledDetail(null);
+    addSystemLog('INFO', 'SYSTEM', 'Active incident cleared — returning to SAFE state');
     try {
       await fetch(`${BACKEND_URL}/api/threats/clear`, { method: 'POST' });
     } catch {
       // Ignore network errors on clear
     }
-  }, []);
+  }, [addSystemLog]);
 
   const clearThreatLog = useCallback(async () => {
     setThreatFeed([]);
@@ -572,6 +645,28 @@ function App() {
       setAiLoading(true);
       setAiReport(null);
 
+      // Play buzzer alarm on incoming threat
+      playBuzzerAlarm();
+
+      // Update OLED with attack details
+      setOledDetail({
+        type: lastMessage.data?.threat_type || 'UNKNOWN',
+        mac: lastMessage.data?.attacker_mac || 'UNKNOWN',
+        channel: lastMessage.data?.channel || 6,
+        rssi: lastMessage.data?.rssi || -42,
+        pkts: lastMessage.data?.packet_count || lastMessage.data?.pkt_rate || 1850,
+      });
+
+      // System logs
+      addSystemLog('CRITICAL', 'SENSOR', `🚨 THREAT DETECTED: ${newAlert.threat_type || 'ANOMALY'}`, {
+        attacker_mac: newAlert.attacker_mac,
+        channel: newAlert.channel,
+        rssi: newAlert.rssi,
+        packet_count: newAlert.packet_count,
+      });
+      addSystemLog('WARNING', 'BUZZER', `🔊 Piezo alarm activated — ${newAlert.threat_type || 'ANOMALY'} alert siren`);
+      addSystemLog('INFO', 'OLED', `📺 OLED display updated: ALERT mode — ${newAlert.threat_type || 'ANOMALY'} | MAC: ${newAlert.attacker_mac || 'N/A'}`);
+
       if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
         new Notification('🚨 Sentinel Threat Detected', {
           body: `Type: ${newAlert.threat_type || 'Anomaly'} | MAC: ${newAlert.attacker_mac || 'N/A'}`
@@ -587,9 +682,22 @@ function App() {
       setAiReport(lastMessage);
       setWifiStatus("MONITORING");
 
+      // Update OLED to monitoring state
+      setOledDetail(prev => prev ? { ...prev, monitoring: true, threat: lastMessage.threat } : null);
+
+      // System logs
+      addSystemLog('SUCCESS', 'AI_AGENT', `🤖 LangGraph AI forensic report complete: ${lastMessage.threat || 'Threat analyzed'}`);
+      addSystemLog('INFO', 'OLED', `📺 OLED display updated: MONITORING mode — AI analysis complete`);
+
       // Auto-resolve to SAFE after 6 seconds for the movie-scene effect
       setTimeout(() => {
-        setWifiStatus(current => current === "MONITORING" ? "SAFE" : current);
+        setWifiStatus(current => {
+          if (current === "MONITORING") {
+            setOledDetail(null);
+            return "SAFE";
+          }
+          return current;
+        });
       }, 6000);
 
       if (notificationsEnabledRef.current && 'Notification' in window && Notification.permission === 'granted') {
@@ -659,21 +767,55 @@ function App() {
   // Launch Attack Simulation
   const triggerSimulation = async (preset = selectedPreset) => {
     setSimLoading(true);
+
+    // 🔊 Play buzzer alarm immediately on launch
+    playBuzzerAlarm();
+
+    const attackMac = simMac || preset.mac;
+    const attackChannel = simChannel || preset.channel;
+    const attackRssi = simRssi || preset.rssi;
+    const attackPkts = simPkts || preset.rate;
+
+    // 📺 Update OLED display with attack details
+    setOledDetail({
+      type: preset.id,
+      name: preset.name,
+      mac: attackMac,
+      channel: attackChannel,
+      rssi: attackRssi,
+      pkts: attackPkts,
+      monitoring: false,
+    });
+
+    // 📝 Add structured system logs
+    addSystemLog('CRITICAL', 'SIMULATOR', `🚀 ATTACK LAUNCHED: ${preset.name} (${preset.id})`, {
+      attacker_mac: attackMac,
+      target_mac: 'FF:FF:FF:FF:FF:FF',
+      channel: attackChannel,
+      rssi: attackRssi,
+      packet_count: attackPkts,
+    });
+    addSystemLog('WARNING', 'BUZZER', `🔊 Piezo buzzer alarm triggered — ${preset.name} attack siren active`);
+    addSystemLog('INFO', 'OLED', `📺 OLED display switched to ALERT mode — showing ${preset.name} details`);
+    addSystemLog('INFO', 'SYSTEM', `📡 Dispatching ${preset.id} to LangGraph AI pipeline for real-time forensic analysis`);
+
     try {
       await fetch(`${BACKEND_URL}/api/threats/simulate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           threat_type: preset.id,
-          attacker_mac: simMac || preset.mac,
+          attacker_mac: attackMac,
           target_mac: 'FF:FF:FF:FF:FF:FF',
-          channel: simChannel || preset.channel,
-          rssi: simRssi || preset.rssi,
-          packet_count: simPkts || preset.rate
+          channel: attackChannel,
+          rssi: attackRssi,
+          packet_count: attackPkts
         })
       });
+      addSystemLog('SUCCESS', 'SIMULATOR', `✅ Attack payload delivered to FastAPI backend successfully`);
     } catch (e) {
       console.error('Simulation error:', e);
+      addSystemLog('CRITICAL', 'SIMULATOR', `❌ Failed to dispatch attack: ${e.message}`);
     } finally {
       setSimLoading(false);
     }
@@ -840,16 +982,50 @@ function App() {
             )}
 
             {/* ESP32 Hardware Mirror */}
-            <div className={`oled-box ${wifiStatus === "ALERT" ? "alert" : ""}`} style={{ padding: '6px 12px', minWidth: 155 }}>
-              <div style={{ fontSize: 7, color: wifiStatus === "ALERT" ? "#f87171" : "#16a34a", letterSpacing: "0.15em", fontWeight: 700 }}>
+            <div className={`oled-box ${wifiStatus === "ALERT" ? "alert" : wifiStatus === "MONITORING" ? "monitoring" : ""}`} style={{ padding: '8px 14px', minWidth: 200 }}>
+              <div style={{ fontSize: 7, color: wifiStatus === "ALERT" ? "#f87171" : wifiStatus === "MONITORING" ? "#ff9f43" : "#16a34a", letterSpacing: "0.15em", fontWeight: 700, marginBottom: 2 }}>
                 ESP32-S3 CORE OLED
               </div>
-              <div style={{ fontWeight: 700, color: wifiStatus === "ALERT" ? "#ff4455" : "#4ade80" }}>
-                {wifiStatus === "ALERT" ? "!! ATTACK DETECTED !!" : "SENTINEL v3.5 ACTIVE"}
-              </div>
-              <div style={{ fontSize: 9, color: "#8b92a5" }}>
-                PKT/S: {pktRate} | CH:{activeChannel} ({wifiStatus})
-              </div>
+
+              {wifiStatus === "ALERT" && oledDetail ? (
+                <>
+                  <div style={{ fontWeight: 800, color: '#ff4455', fontSize: 11, letterSpacing: '0.08em', animation: 'oledTextBlink 0.5s infinite' }}>
+                    !! {oledDetail.name || oledDetail.type} !!
+                  </div>
+                  <div style={{ fontSize: 8.5, color: '#ff6b81', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
+                    MAC: {oledDetail.mac}
+                  </div>
+                  <div style={{ fontSize: 8, color: '#e8eaf0', fontFamily: 'var(--font-mono)', display: 'flex', gap: 8, marginTop: 1 }}>
+                    <span>CH:{oledDetail.channel}</span>
+                    <span>RSSI:{oledDetail.rssi}dBm</span>
+                    <span>{oledDetail.pkts}pkt/s</span>
+                  </div>
+                  <div style={{ fontSize: 7, color: '#ff9f43', marginTop: 2, letterSpacing: '0.1em' }}>
+                    🔊 BUZZER ACTIVE | 📡 AI PIPELINE RUNNING
+                  </div>
+                </>
+              ) : wifiStatus === "MONITORING" && oledDetail ? (
+                <>
+                  <div style={{ fontWeight: 700, color: '#ff9f43', fontSize: 10.5 }}>
+                    THREAT CONTAINED
+                  </div>
+                  <div style={{ fontSize: 8.5, color: '#4ade80', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
+                    AI ANALYSIS COMPLETE
+                  </div>
+                  <div style={{ fontSize: 8, color: '#8b92a5', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
+                    {oledDetail.type} | {oledDetail.mac?.slice(0, 8)}...
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontWeight: 700, color: '#4ade80' }}>
+                    SENTINEL v3.5 ACTIVE
+                  </div>
+                  <div style={{ fontSize: 9, color: '#8b92a5' }}>
+                    PKT/S: {pktRate} | CH:{activeChannel} ({wifiStatus})
+                  </div>
+                </>
+              )}
             </div>
 
             <div className={`connection-badge ${isConnected ? 'connected' : 'disconnected'}`} id="ws-status">
@@ -1539,6 +1715,73 @@ function App() {
         {/* ─── VIEW 7: ALERTS LOG ──────────────────────────────── */}
         {activeNav === 'alerts' && (
           <div className="dashboard">
+            {/* System Logs Panel */}
+            <div className="panel animate-in">
+              <div className="panel-header">
+                <div>
+                  <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Terminal size={18} style={{ color: 'var(--accent-cyan)' }} />
+                    System Event Logs
+                  </div>
+                  <div className="panel-subtitle">{systemLogs.length} events — Buzzer, OLED, Simulator, AI Agent, and Sensor activity</div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="panel-tab" onClick={() => setSystemLogs([])} style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--accent-red)' }}>
+                    <Trash2 size={13} /> Clear Logs
+                  </button>
+                </div>
+              </div>
+              <div className="alert-list" style={{ maxHeight: 340, overflowY: 'auto' }}>
+                {systemLogs.length === 0 ? (
+                  <div style={{ padding: '30px', textAlign: 'center', color: '#5c6575' }}>No system logs yet. Launch an attack to see buzzer, OLED, and system events.</div>
+                ) : (
+                  systemLogs.map(log => {
+                    const levelColors = {
+                      CRITICAL: '#ff4757',
+                      WARNING: '#ff9f43',
+                      INFO: '#4cc9f0',
+                      SUCCESS: '#06d6a0',
+                    };
+                    const sourceIcons = {
+                      BUZZER: '🔊',
+                      OLED: '📺',
+                      SIMULATOR: '🚀',
+                      AI_AGENT: '🤖',
+                      SENSOR: '📡',
+                      SYSTEM: '⚙️',
+                    };
+                    return (
+                      <div key={log.id} className={`alert-item log-entry ${log.level.toLowerCase()}`} style={{ borderLeft: `3px solid ${levelColors[log.level] || '#5c6575'}` }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, width: '100%' }}>
+                          <div style={{ fontSize: 16, lineHeight: 1.2, flexShrink: 0 }}>{sourceIcons[log.source] || '📋'}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                              <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: '0.1em', color: levelColors[log.level], background: `${levelColors[log.level]}15`, padding: '1px 6px', borderRadius: 3 }}>
+                                {log.level}
+                              </span>
+                              <span style={{ fontSize: 9, fontWeight: 600, color: '#8b92a5', letterSpacing: '0.05em' }}>{log.source}</span>
+                            </div>
+                            <div style={{ fontSize: 12.5, color: '#e8eaf0', lineHeight: 1.5 }}>{log.message}</div>
+                            {log.details && Object.keys(log.details).length > 0 && (
+                              <div style={{ fontSize: 10.5, color: '#8b92a5', fontFamily: 'var(--font-mono)', marginTop: 4, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                                {Object.entries(log.details).map(([k, v]) => (
+                                  <span key={k}>{k}: <span style={{ color: '#4cc9f0' }}>{v}</span></span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 10, color: '#5c6575', flexShrink: 0, fontFamily: 'var(--font-mono)' }}>
+                            {new Date(log.timestamp).toLocaleTimeString()}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Threat Feed Panel */}
             <div className="panel animate-in">
               <div className="panel-header">
                 <div>
