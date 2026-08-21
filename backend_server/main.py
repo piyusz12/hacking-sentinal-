@@ -76,7 +76,7 @@ except ImportError:
 # --- Configuration & Environment ---
 WS_AUTH_TOKEN = os.environ.get("SENTINEL_WS_TOKEN", "sentinel-dev-token-change-me")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_LOCAL_MODEL = os.environ.get("SENTINEL_LOCAL_MODEL", "llama3.2-vision:latest")
+DEFAULT_LOCAL_MODEL = os.environ.get("SENTINEL_LOCAL_MODEL", "llama3:latest")
 MAX_DASHBOARD_CLIENTS = int(os.environ.get("SENTINEL_MAX_DASHBOARD", "50"))
 MAX_ESP32_CLIENTS = int(os.environ.get("SENTINEL_MAX_ESP32", "10"))
 MAX_CONCURRENT_AI_TASKS = int(os.environ.get("SENTINEL_MAX_AI_TASKS", "5"))
@@ -121,7 +121,7 @@ class LocalOllamaEngine:
                     models_list = data.get("models", [])
                     self.available_models = [m.get("name", "") for m in models_list]
                     self.ollama_online = True
-                    self.active_model = "llama3.2-vision:latest"
+                    self.active_model = "llama3:latest"
                     return self.available_models
         except Exception as e:
             logger.debug(f"Ollama discovery ping failed: {e}")
@@ -141,7 +141,7 @@ class LocalOllamaEngine:
         if not self.ollama_online:
             return {"response": "", "model": "offline", "engine": "local_ai", "success": False}
 
-        candidate = model_override or self.active_model or "llama3.2-vision:latest"
+        candidate = model_override or self.active_model or "llama3:latest"
         candidates = [candidate]
 
         # Attach images to user message if present
@@ -1343,6 +1343,37 @@ async def simulate_telemetry_burst(packet_rate: int):
             }
         })
         await asyncio.sleep(0.1)
+
+@app.post("/api/threats/clear")
+async def clear_system_state():
+    """Clear threat history and stop all simulations (Full Reset)."""
+    global total_threats_detected
+    
+    # 1. Clear local history
+    threat_history.clear()
+    
+    # 2. Reset counters
+    async with _threat_count_lock:
+        total_threats_detected = 0
+        
+    # 3. Stop main AutoSimulationEngine if it exists
+    if 'sim_engine' in globals():
+        sim_engine.stop()
+        
+    # 4. Try clearing the routers/threats.py state
+    try:
+        from backend_server.routers.threats import threat_history as router_threat_history
+        from backend_server.routers.threats import active_simulations
+        router_threat_history.clear()
+        active_simulations.clear()
+    except Exception as e:
+        logger.warning(f"Could not reset routers/threats state: {e}")
+        
+    # 5. Broadcast reset event
+    await manager.broadcast_to_dashboards({"type": "incident_reset"})
+    
+    return {"success": True, "message": "System fully reset."}
+
 
 @app.post("/api/threats/simulate")
 async def simulate_threat(sim: SimulationRequest):

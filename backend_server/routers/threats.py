@@ -138,6 +138,8 @@ async def run_simulation(
             "packet_count": pps
         })
         
+        ai_triggered = False
+        
         while datetime.utcnow() < end_time and active_simulations.get(simulation_id):
             
             # Generate simulated threat data
@@ -163,6 +165,11 @@ async def run_simulation(
             threat_history.insert(0, threat_record)
             if len(threat_history) > settings.threat_history_limit:
                 threat_history.pop()
+            
+            # Trigger AI analysis for the simulated threat only once
+            if not ai_triggered:
+                asyncio.create_task(analyze_threat_async(threat_record))
+                ai_triggered = True
             
             packet_count += pps
             await asyncio.sleep(1)

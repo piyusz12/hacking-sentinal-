@@ -86,6 +86,7 @@ enum SentinelState { ST_BOOT, ST_SAFE, ST_ALERT, ST_MONITORING };
 volatile SentinelState sysState = ST_BOOT;
 
 char g_alert_type[32] = "";
+char g_mitigation[128] = "";
 char g_alert_mac[18]  = "";
 int8_t g_alert_rssi   = -50;
 uint8_t g_alert_ch    = 6;
@@ -150,7 +151,7 @@ inline void fmtMAC(const uint8_t* addr, char* out) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 void buzzerTone(int freqHz, int durationMs) {
   if (freqHz > 0) {
-    tone(BUZZER_PIN, freqHz, durationMs);
+    tone(BUZZER_PIN, freqHz);
     delay(durationMs);
   } else {
     delay(durationMs);
@@ -212,21 +213,14 @@ void setRGB(uint8_t r, uint8_t g, uint8_t b) {
 void updateRGB() {
   unsigned long now = millis();
 
-  if (sysState == ST_ALERT) {
-    // Strobe red for attack
-    if (now - last_rgb_update_ms > 50) {
-      rgb_strobe_state = !rgb_strobe_state;
-      if (rgb_strobe_state) {
-        setRGB(255, 0, 0); // Only red for attack
-      } else {
-        setRGB(0, 0, 0);
-      }
-      last_rgb_update_ms = now;
+  // Refresh every 500ms so temporary flashes (like Purple voice trigger) can revert automatically
+  if (now - last_rgb_update_ms > 500) {
+    if (sysState == ST_ALERT) {
+      setRGB(255, 0, 0); // Solid Red for attack
+    } else {
+      setRGB(0, 0, 150); // Solid Blue for rest time (safe/monitoring)
     }
-  } else {
-    // Breathing blue for safe, boot, and monitoring
-    float intensity = (sin(now / 1500.0) + 1.0) * 0.5 * 50.0 + 5.0;
-    setRGB(0, 0, (uint8_t)intensity);
+    last_rgb_update_ms = now;
   }
 }
 
@@ -264,12 +258,11 @@ void drawRadar(int cx, int cy, int radius, int angle) {
   }
 }
 
-// ── Crosshair Target Lock (drawn on ALERT screen)
-void drawCrosshair(int cx, int cy, int size) {
-  display.drawLine(cx - size, cy, cx + size, cy, SSD1306_WHITE);
-  display.drawLine(cx, cy - size, cx, cy + size, SSD1306_WHITE);
-  display.drawCircle(cx, cy, size - 2, SSD1306_WHITE);
-  display.drawCircle(cx, cy, size / 2, SSD1306_WHITE);
+// ── Warning Sign (drawn on ALERT screen)
+void drawWarningSign(int cx, int cy, int size) {
+  display.drawTriangle(cx, cy - size, cx - (size-2), cy + size, cx + (size-2), cy + size, SSD1306_WHITE);
+  display.drawLine(cx, cy - size/2 + 2, cx, cy + size/2 - 1, SSD1306_WHITE);
+  display.drawPixel(cx, cy + size/2 + 2, SSD1306_WHITE);
 }
 
 // ── BOOT SCREEN: Progress bar with stage labels
@@ -352,8 +345,8 @@ void oledAlert(const char* type, const char* mac, int8_t rssi, uint8_t ch, int p
 
   display.drawLine(0, 18, 127, 18, SSD1306_WHITE);
 
-  // Crosshair graphic in corner
-  drawCrosshair(112, 35, 10);
+  // Warning sign in corner
+  drawWarningSign(112, 30, 14);
 
   // Threat details
   display.setTextSize(1);
@@ -377,36 +370,28 @@ void oledAlert(const char* type, const char* mac, int8_t rssi, uint8_t ch, int p
   display.display();
 }
 
-// ── MONITORING SCREEN: AI analysis progress bar + threat summary
-void oledMonitoring(const char* type) {
+// ── MONITORING SCREEN: Real-time AI Mitigation display
+void oledMonitoring() {
   display.clearDisplay();
   display.invertDisplay(false);
 
   // Header
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println(F("AI FORENSICS ACTIVE"));
+  display.println(F("THREAT CONTAINED"));
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   // Threat being analyzed
   display.setCursor(0, 13);
-  display.print(F("Target: "));
-  char shortType[17]; strncpy(shortType, type, 16); shortType[16] = '\0';
+  display.print(F("Type: "));
+  char shortType[17]; strncpy(shortType, g_alert_type, 16); shortType[16] = '\0';
   display.println(shortType);
 
-  // Animated progress bar
-  unsigned long elapsed = millis() - monitoring_start_ms;
-  int progress = min(100, (int)(elapsed / 60));  // Fills in ~6 seconds
-  display.setCursor(0, 26); display.println(F("Llama 3.2 Analysis:"));
-  display.drawRect(4, 36, 120, 10, SSD1306_WHITE);
-  int fillW = (int)((long)progress * 116 / 100);
-  if (fillW > 0) display.fillRect(6, 38, fillW, 6, SSD1306_WHITE);
-  char pct[6]; snprintf(pct, sizeof(pct), "%d%%", progress);
-  display.setCursor(100, 26); display.print(pct);
-
-  // Status lines
-  display.setCursor(0, 49); display.println(F("LangGraph: RUNNING"));
-  display.setCursor(0, 58); display.println(F("Playbook:  GENERATING"));
+  display.setCursor(0, 26);
+  display.println(F("AI Action (LangGraph):"));
+  
+  display.setCursor(0, 36);
+  display.println(g_mitigation);
 
   display.display();
 }
@@ -433,7 +418,7 @@ void updateOLED() {
       oledAlert(g_alert_type, g_alert_mac, g_alert_rssi, g_alert_ch, g_alert_pkts, oled_blink);
       break;
     case ST_MONITORING:
-      oledMonitoring(g_alert_type);
+      oledMonitoring(); // Shows real AI mitigation
       break;
     default:
       break;
@@ -501,67 +486,59 @@ void audioAlarmTask(void* pvParams) {
           if (t.indexOf("DEAUTH") != -1) {
             // Aggressive high-low siren (Police style)
             for (int i = 0; i < 4; i++) {
-              tone(BUZZER_PIN, 2500, 100);
               if (hw_spk_ok) spkTone(1800, 100); 
-              delay(100);
-              noTone(BUZZER_PIN); delay(20);
-              tone(BUZZER_PIN, 1800, 100);
+              buzzerTone(2500, 100);
+              delay(20);
               if (hw_spk_ok) spkTone(1200, 100); 
-              delay(100);
-              noTone(BUZZER_PIN); delay(20);
+              buzzerTone(1800, 100);
+              delay(20);
             }
           } else if (t.indexOf("EVIL") != -1 || t.indexOf("TWIN") != -1) {
             // Evil Twin: Rapid sharp bursts
             for (int i = 0; i < 6; i++) {
-              tone(BUZZER_PIN, 3500, 40);
               if (hw_spk_ok) spkTone(2500, 40); 
-              delay(40);
-              noTone(BUZZER_PIN); delay(60);
+              buzzerTone(3500, 40);
+              delay(60);
             }
           } else if (t.indexOf("BEACON") != -1) {
             // Beacon Flood: Fast alternating triplets
             for (int i = 0; i < 3; i++) {
-              tone(BUZZER_PIN, 1000, 60); delay(60); noTone(BUZZER_PIN);
-              tone(BUZZER_PIN, 1500, 60); delay(60); noTone(BUZZER_PIN);
-              tone(BUZZER_PIN, 2000, 60); delay(60); noTone(BUZZER_PIN);
+              buzzerTone(1000, 60); delay(60);
+              buzzerTone(1500, 60); delay(60);
+              buzzerTone(2000, 60); delay(60);
               delay(50);
             }
           } else if (t.indexOf("PROBE") != -1) {
             // Probe Recon: Sonar-like pings
             for (int i = 0; i < 3; i++) {
-              tone(BUZZER_PIN, 3000, 50);
               if (hw_spk_ok) spkTone(2800, 50); 
-              delay(50);
-              noTone(BUZZER_PIN); delay(200);
+              buzzerTone(3000, 50);
+              delay(200);
             }
           } else if (t.indexOf("KARMA") != -1) {
             // Karma: Low frequency buzzes
             for (int i = 0; i < 5; i++) {
-              tone(BUZZER_PIN, 800, 80);
               if (hw_spk_ok) spkTone(500, 80); 
-              delay(80);
-              noTone(BUZZER_PIN); delay(40);
+              buzzerTone(800, 80);
+              delay(40);
             }
           } else if (t.indexOf("PMKID") != -1) {
             // PMKID: Sweeping tone burst
             for (int i = 0; i < 2; i++) {
               for (int f = 1000; f < 3000; f += 200) {
-                tone(BUZZER_PIN, f, 15);
-                delay(15);
+                buzzerTone(f, 15);
               }
-              noTone(BUZZER_PIN); delay(50);
+              delay(50);
             }
           } else {
             // Default: Standard rising siren
             for (int i = 0; i < 3; i++) {
-              tone(BUZZER_PIN, 2500, 100);
               if (hw_spk_ok) spkTone(1800, 100); 
-              delay(100);
-              noTone(BUZZER_PIN); delay(40);
-              tone(BUZZER_PIN, 3000, 80);
+              buzzerTone(2500, 100);
+              delay(40);
               if (hw_spk_ok) spkTone(2200, 80); 
-              delay(80);
-              noTone(BUZZER_PIN); delay(30);
+              buzzerTone(3000, 80);
+              delay(30);
             }
           }
           break;
@@ -737,10 +714,11 @@ void enterAlertState(const char* type, const char* mac, int8_t rssi, uint8_t ch,
   playAlertAlarm();
 }
 
-void enterMonitoringState(const char* type) {
+void enterMonitoringState(const char* type, const char* action) {
   sysState = ST_MONITORING;
   monitoring_start_ms = millis();
   strlcpy(g_alert_type, type, sizeof(g_alert_type));
+  strlcpy(g_mitigation, action, sizeof(g_mitigation));
 
   Serial.printf("[MONITORING] AI analyzing: %s\n", type);
 
@@ -778,7 +756,8 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
     // ── Backend sends ai_report when LangGraph analysis is complete
     else if (strcmp(msgType, "ai_report") == 0) {
       const char* ttype = doc["threat_type"] | g_alert_type;
-      enterMonitoringState(ttype);
+      const char* summary = doc["summary"] | "AUTO-CONTAINED";
+      enterMonitoringState(ttype, summary);
     }
     // ── Backend sends incident_reset to clear all indicators
     else if (strcmp(msgType, "incident_reset") == 0) {
@@ -909,7 +888,6 @@ void setup() {
   delay(500);
 
   sysState = ST_SAFE;
-  setRGB(0, 50, 0);
   Serial.println("[SYSTEM] ===== Sentinel v4.1 (PRO) ONLINE =====");
 }
 
@@ -941,7 +919,7 @@ void loop() {
 
     // Auto-transition: ALERT → MONITORING after telemetry cycle
     if (sysState == ST_ALERT && (millis() - alert_start_ms > 4000)) {
-      enterMonitoringState(g_alert_type);
+      enterMonitoringState(g_alert_type, "Local Auto-Containment");
     }
   }
 

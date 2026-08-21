@@ -128,8 +128,23 @@ EXPORT int decode_80211_frame(const uint8_t *raw_data, size_t length, ParsedFram
                 out->threat_severity = 2;
                 break;
             case 0x05: // Probe Response
-                strcpy(out->threat_classification, "PROBE_RESPONSE");
-                out->threat_severity = 2;
+                // Karma Attack Detection: High-speed C check for anomalous SSID length or wildcard
+                if (length > sizeof(IEEE80211_Header) + 12) {
+                    // Check if SSID IE (Tag 0) has anomalous length > 32 (illegal) or 0 (wildcard response)
+                    uint8_t ssid_tag = raw_data[sizeof(IEEE80211_Header) + 12];
+                    uint8_t ssid_len = raw_data[sizeof(IEEE80211_Header) + 13];
+                    if (ssid_tag == 0 && (ssid_len == 0 || ssid_len > 32)) {
+                        strcpy(out->threat_classification, "KARMA_ATTACK");
+                        out->is_threat = 1;
+                        out->threat_severity = 5;
+                    } else {
+                        strcpy(out->threat_classification, "PROBE_RESPONSE");
+                        out->threat_severity = 2;
+                    }
+                } else {
+                    strcpy(out->threat_classification, "PROBE_RESPONSE");
+                    out->threat_severity = 2;
+                }
                 break;
             case 0x0B: // Authentication
                 strcpy(out->threat_classification, "AUTH_TRANSACTION");
@@ -144,9 +159,26 @@ EXPORT int decode_80211_frame(const uint8_t *raw_data, size_t length, ParsedFram
             // Check for LLC header (0xAA 0xAA 0x03) + EtherType (0x88 0x8E)
             for (size_t i = sizeof(IEEE80211_Header); i < length - 2; i++) {
                 if (raw_data[i] == 0x88 && raw_data[i + 1] == 0x8E) {
-                    strcpy(out->threat_classification, "EAPOL_HANDSHAKE");
+                    // PMKID Extraction & Handshake Capture Detection
+                    // Scanning EAPOL body for RSN PMKID signatures natively in C for massive speedup
+                    int has_pmkid = 0;
+                    if (i + 50 < length) {
+                        for (size_t j = i; j < length - 4; j++) {
+                            // Look for RSN IE Tag (48) or WPA Key Data PMKID identifier
+                            if (raw_data[j] == 0x30 && raw_data[j+1] == 0x14) { 
+                                has_pmkid = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (has_pmkid) {
+                        strcpy(out->threat_classification, "PMKID_ROASTING");
+                        out->threat_severity = 5;
+                    } else {
+                        strcpy(out->threat_classification, "EAPOL_HANDSHAKE");
+                        out->threat_severity = 4;
+                    }
                     out->is_threat = 1;
-                    out->threat_severity = 4;
                     break;
                 }
             }
